@@ -12,31 +12,54 @@ new class extends Component
 
     public function mount($id)
     {
-        $this->leadId = $id;
-        $this->loadLead();
-        
-        // If lead is not opened and user is sales or admin, mark as opened
-        if (!$this->lead->opened_by && (auth()->user()->isSalesTeam() || auth()->user()->isAdmin())) {
-            $this->lead->markAsOpened(auth()->user());
+        try {
+            $this->leadId = $id;
+            $this->loadLead();
             
-            // Notify the creator that lead was opened
-            if ($this->lead->created_by !== auth()->id()) {
-                \App\Models\Notification::create([
-                    'user_id' => $this->lead->created_by,
-                    'lead_id' => $this->lead->id,
-                    'type' => 'lead_opened',
-                    'message' => "Lead '{$this->lead->name}' has been opened by " . auth()->user()->name,
-                ]);
+            if (!$this->lead) {
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Lead not found.']);
+                return;
             }
             
-            // Dispatch events to refresh leads list and notifications
-            $this->dispatch('lead-opened');
+            // If lead is not opened and user is sales or admin, mark as opened
+            if (auth()->check() && !$this->lead->opened_by && (auth()->user()->isSalesTeam() || auth()->user()->isAdmin())) {
+                try {
+                    $this->lead->markAsOpened(auth()->user());
+                    
+                    // Notify the creator that lead was opened
+                    if ($this->lead->created_by !== auth()->id()) {
+                        \App\Models\Notification::create([
+                            'user_id' => $this->lead->created_by,
+                            'lead_id' => $this->lead->id,
+                            'type' => 'lead_opened',
+                            'message' => "Lead '{$this->lead->name}' has been opened by " . auth()->user()->name,
+                        ]);
+                    }
+                    
+                    // Dispatch events to refresh leads list and notifications
+                    $this->dispatch('lead-opened');
+                } catch (\Exception $e) {
+                    \Illuminate\Support\Facades\Log::error('Error marking lead as opened: ' . $e->getMessage());
+                }
+            }
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Error mounting lead show: ' . $e->getMessage());
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to load lead details.']);
         }
     }
 
     public function loadLead()
     {
-        $this->lead = Lead::with(['creator', 'opener', 'comments.user'])->findOrFail($this->leadId);
+        try {
+            $this->lead = Lead::with(['creator', 'opener', 'comments.user'])->find($this->leadId);
+            
+            if (!$this->lead) {
+                abort(404, 'Lead not found');
+            }
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Error loading lead: ' . $e->getMessage());
+            abort(404, 'Lead not found');
+        }
     }
 
     #[On('lead-opened')]
@@ -48,47 +71,92 @@ new class extends Component
 
     public function updateStatus($status)
     {
-        $this->lead->update(['status' => $status]);
-        
-        // Reload lead to get fresh data
-        $this->loadLead();
-        
-        // Dispatch events to refresh leads list and notifications
-        $this->dispatch('lead-updated');
-        
-        request()->session()->flash('message', 'Lead status updated successfully!');
+        try {
+            if (!auth()->check()) {
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'You must be logged in.']);
+                return;
+            }
+
+            if (!auth()->user()->isSalesTeam() && !auth()->user()->isAdmin()) {
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'You do not have permission to update lead status.']);
+                return;
+            }
+
+            $validStatuses = ['wrong number', 'follow up', 'hired us', 'hired someone', 'no response'];
+            if (!in_array($status, $validStatuses, true)) {
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Invalid status.']);
+                return;
+            }
+
+            $this->lead->update(['status' => $status]);
+            
+            // Dispatch events to refresh leads list and notifications
+            $this->dispatch('lead-updated');
+            
+            // Set success message in session
+            session()->flash('message', 'Lead status updated successfully!');
+            
+            // Redirect to leads index page with success message
+            return $this->redirect(route('leads.index'));
+            
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Error updating lead status: ' . $e->getMessage());
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to update lead status. Please try again.']);
+        }
     }
 
     public function addComment()
     {
-        if (!auth()->user()->isSalesTeam()) {
-            abort(403);
+        try {
+            if (!auth()->check()) {
+                $this->dispatch('show-toast', type: 'error', message: 'You must be logged in.');
+                return;
+            }
+
+            if (!auth()->user()->isSalesTeam()) {
+                $this->dispatch('show-toast', type: 'error', message: 'You do not have permission to add comments.');
+                return;
+            }
+
+            $this->validate([
+                'commentMessage' => 'required|string|max:5000',
+            ]);
+
+            \App\Models\LeadComment::create([
+                'lead_id' => $this->lead->id,
+                'user_id' => auth()->id(),
+                'message' => trim($this->commentMessage),
+            ]);
+
+            $this->reset('commentMessage');
+            $this->loadLead();
+            
+            $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Comment added successfully.']);
+            request()->session()->flash('message', 'Comment added.');
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            throw $e;
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Error adding comment: ' . $e->getMessage());
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to add comment. Please try again.']);
         }
-
-        $this->validate([
-            'commentMessage' => 'required|string',
-        ]);
-
-        \App\Models\LeadComment::create([
-            'lead_id' => $this->lead->id,
-            'user_id' => auth()->id(),
-            'message' => $this->commentMessage,
-        ]);
-
-        $this->reset('commentMessage');
-        $this->loadLead();
-        request()->session()->flash('message', 'Comment added.');
     }
 
     public function render()
     {
-        // Reload lead to ensure fresh data
-        $this->loadLead();
-        return view('components.leads.⚡show');
+        try {
+            // Reload lead to ensure fresh data
+            if ($this->leadId) {
+                $this->loadLead();
+            }
+            return view('components.leads.⚡show');
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Error rendering lead show: ' . $e->getMessage());
+            abort(404, 'Lead not found');
+        }
     }
 };?>
 
-<div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-6" wire:poll.3s="loadLead">
+<div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-6" wire:poll.5s="loadLead">
     <!-- Header -->
     <div class="mb-6 flex items-center justify-between">
         <div class="flex items-center space-x-4">
@@ -226,7 +294,7 @@ new class extends Component
                 </div>
             </div>
 
-            @if($lead->notes)
+            @if(!empty($lead->notes))
                 <div class="bg-blue-50 p-5 rounded-lg border border-blue-200">
                     <p class="text-xs font-semibold text-blue-700 uppercase mb-2">Additional Comments</p>
                     <p class="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">{{ $lead->notes }}</p>
@@ -239,7 +307,7 @@ new class extends Component
                     <span class="text-xs text-gray-500">{{ $lead->comments->count() }} total</span>
                 </div>
 
-                @if($lead->comments->count() > 0)
+                @if($lead->comments && $lead->comments->count() > 0)
                     <div class="grid grid-cols-2 gap-4 text-xs font-semibold text-gray-500 uppercase mb-2 px-1">
                         <span>Agent Name</span>
                         <span>Comments</span>
@@ -248,10 +316,10 @@ new class extends Component
                         @foreach($lead->comments->sortByDesc('created_at') as $comment)
                             <div class="border border-gray-200 rounded-lg p-4 bg-gray-50 grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <div>
-                                    <p class="text-sm font-semibold text-gray-900">{{ $comment->user->name }}</p>
+                                    <p class="text-sm font-semibold text-gray-900">{{ $comment->user->name ?? 'Unknown' }}</p>
                                     <p class="text-xs text-gray-500">{{ $comment->created_at->format('M d, Y H:i') }}</p>
                                 </div>
-                                <p class="text-sm text-gray-700 whitespace-pre-wrap">{{ $comment->message }}</p>
+                                <p class="text-sm text-gray-700 whitespace-pre-wrap">{{ $comment->message ?? '' }}</p>
                             </div>
                         @endforeach
                     </div>
@@ -269,8 +337,20 @@ new class extends Component
                         ></textarea>
                         @error('commentMessage') <span class="text-red-500 text-sm block">{{ $message }}</span> @enderror
                         <div class="flex justify-end">
-                            <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold shadow-sm hover:shadow-md transition-all">
-                                Add Comment
+                            <button 
+                                type="submit" 
+                                wire:loading.attr="disabled"
+                                wire:target="addComment"
+                                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2"
+                            >
+                                <span wire:loading.remove wire:target="addComment">Add Comment</span>
+                                <span wire:loading wire:target="addComment" class="flex items-center space-x-2">
+                                    <svg class="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    <span>Adding...</span>
+                                </span>
                             </button>
                         </div>
                     </form>
@@ -282,34 +362,49 @@ new class extends Component
                     <h3 class="text-base font-semibold text-gray-900 mb-4">Update Status</h3>
                     <div class="flex flex-wrap gap-3">
                         <button 
-                            wire:click="updateStatus('follow up')" 
-                            class="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-semibold shadow-sm hover:shadow-md transition-all"
+                            wire:click="updateStatus('follow up')"
+                            wire:loading.attr="disabled"
+                            wire:target="updateStatus"
+                            class="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-semibold shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                            Mark as Follow Up
+                            <span wire:loading.remove wire:target="updateStatus">Mark as Follow Up</span>
+                            <span wire:loading wire:target="updateStatus">Updating...</span>
                         </button>
                         <button 
-                            wire:click="updateStatus('hired us')" 
-                            class="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg font-semibold shadow-sm hover:shadow-md transition-all"
+                            wire:click="updateStatus('hired us')"
+                            wire:loading.attr="disabled"
+                            wire:target="updateStatus"
+                            class="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg font-semibold shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                            Mark as Hired Us
+                            <span wire:loading.remove wire:target="updateStatus">Mark as Hired Us</span>
+                            <span wire:loading wire:target="updateStatus">Updating...</span>
                         </button>
                         <button 
-                            wire:click="updateStatus('hired someone')" 
-                            class="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-lg font-semibold shadow-sm hover:shadow-md transition-all"
+                            wire:click="updateStatus('hired someone')"
+                            wire:loading.attr="disabled"
+                            wire:target="updateStatus"
+                            class="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-lg font-semibold shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                            Mark as Hired Someone
+                            <span wire:loading.remove wire:target="updateStatus">Mark as Hired Someone</span>
+                            <span wire:loading wire:target="updateStatus">Updating...</span>
                         </button>
                         <button 
-                            wire:click="updateStatus('wrong number')" 
-                            class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-semibold shadow-sm hover:shadow-md transition-all"
+                            wire:click="updateStatus('wrong number')"
+                            wire:loading.attr="disabled"
+                            wire:target="updateStatus"
+                            class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-semibold shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                            Mark as Wrong Number
+                            <span wire:loading.remove wire:target="updateStatus">Mark as Wrong Number</span>
+                            <span wire:loading wire:target="updateStatus">Updating...</span>
                         </button>
                         <button 
-                            wire:click="updateStatus('no response')" 
-                            class="px-4 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-lg font-semibold shadow-sm hover:shadow-md transition-all"
+                            wire:click="updateStatus('no response')"
+                            wire:loading.attr="disabled"
+                            wire:target="updateStatus"
+                            class="px-4 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-lg font-semibold shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                            Mark as No Response
+                            <span wire:loading.remove wire:target="updateStatus">Mark as No Response</span>
+                            <span wire:loading wire:target="updateStatus">Updating...</span>
                         </button>
                     </div>
                 </div>

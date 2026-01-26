@@ -67,7 +67,73 @@
         {{ $slot }}
     </main>
 
+    <!-- Toast Notification Container -->
+    <div id="toast-container" class="fixed top-4 right-4 z-50 space-y-2" style="z-index: 9999;"></div>
+
     @livewireScripts
     <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+    
+    <script>
+        // Toast Notification System
+        function showToast(message, type = 'info') {
+            if (!message) return;
+
+            const container = document.getElementById('toast-container');
+            if (!container) return;
+
+            const toast = document.createElement('div');
+            const bgColors = {
+                'success': 'bg-green-500',
+                'error': 'bg-red-500',
+                'warning': 'bg-yellow-500',
+                'info': 'bg-blue-500'
+            };
+            const bgColor = bgColors[type] || bgColors.info;
+
+            toast.className = `${bgColor} text-white px-6 py-4 rounded-lg shadow-lg flex items-center justify-between min-w-[300px] max-w-[500px] transform transition-all duration-300 translate-x-full opacity-0`;
+            toast.innerHTML = `
+                <span class="flex-1">${message}</span>
+                <button onclick="this.parentElement.remove()" class="ml-4 text-white hover:text-gray-200 focus:outline-none">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+            `;
+
+            container.appendChild(toast);
+
+            // Animate in
+            setTimeout(() => {
+                toast.classList.remove('translate-x-full', 'opacity-0');
+            }, 10);
+
+            // Auto remove after 5 seconds
+            setTimeout(() => {
+                toast.classList.add('translate-x-full', 'opacity-0');
+                setTimeout(() => {
+                    if (toast.parentElement) {
+                        toast.remove();
+                    }
+                }, 300);
+            }, 5000);
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            // Listen for browser events
+            window.addEventListener('show-toast', function(event) {
+                const { type = 'info', message = '' } = event.detail || {};
+                showToast(message, type);
+            });
+        });
+
+        // Listen for Livewire events (works after Livewire loads)
+        document.addEventListener('livewire:init', () => {
+            Livewire.on('show-toast', (data) => {
+                const message = typeof data === 'string' ? data : (data?.message || '');
+                const type = data?.type || 'info';
+                showToast(message, type);
+            });
+        });
+    </script>
 </body>
 </html>

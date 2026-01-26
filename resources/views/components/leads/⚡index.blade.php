@@ -6,6 +6,7 @@ use App\Models\User;
 use Livewire\Component;
 use Livewire\WithPagination;
 use Livewire\Attributes\On;
+use Illuminate\Support\Facades\Log;
 
 new class extends Component
 {
@@ -14,10 +15,12 @@ new class extends Component
     public $search = '';
     public $statusFilter = '';
     public $sheetFilter = '';
+    public $viewMode = 'table'; // 'table' or 'list' for scrapper users
     public $leadsData = [];
     public $pendingCreates = [];
     protected $queryString = [
         'sheetFilter' => ['except' => ''],
+        'viewMode' => ['except' => 'table'],
     ];
 
     public function updatingSearch()
@@ -63,136 +66,187 @@ new class extends Component
 
     public function updatedLeadsData($value, $key)
     {
-        if (!auth()->user()->isScrapper()) {
-            return;
-        }
-
-        if (!$this->sheetFilter) {
-            return;
-        }
-
-        [$index, $field] = explode('.', $key) + [null, null];
-        if ($index === null || $field === null) {
-            return;
-        }
-
-        $allowed = ['name', 'email', 'services', 'phone', 'location', 'position', 'platform', 'linkedin', 'detail', 'web_link'];
-        if (!in_array($field, $allowed, true)) {
-            return;
-        }
-
-        $row = $this->leadsData[$index] ?? null;
-        if (!$row) {
-            return;
-        }
-
-        if ($field === 'name' && $row['id'] && $value === '') {
-            Lead::where('id', $row['id'])
-                ->where('created_by', auth()->id())
-                ->delete();
-            array_splice($this->leadsData, (int) $index, 1);
-            $this->ensureEmptyRow();
-            $this->dispatch('lead-updated');
-            return;
-        }
-
-        if ($field === 'email' && $value && !filter_var($value, FILTER_VALIDATE_EMAIL)) {
-            return;
-        }
-
-        if (empty($row['id'])) {
-            if (empty($row['name'])) {
+        try {
+            if (!auth()->check() || !auth()->user()->isScrapper()) {
                 return;
             }
 
-            if (!empty($this->pendingCreates[$index])) {
+            if (!$this->sheetFilter) {
                 return;
             }
 
-            $this->pendingCreates[$index] = true;
-
-            $existingLead = Lead::where('created_by', auth()->id())
-                ->where('lead_sheet_id', $this->sheetFilter)
-                ->where('name', $row['name'])
-                ->whereDate('lead_date', now()->toDateString())
-                ->orderBy('created_at', 'desc')
-                ->first();
-
-            if ($existingLead) {
-                $this->leadsData[$index]['id'] = $existingLead->id;
-                $this->pendingCreates[$index] = false;
+            [$index, $field] = explode('.', $key) + [null, null];
+            if ($index === null || $field === null) {
                 return;
             }
 
-            $lead = Lead::create([
-                'created_by' => auth()->id(),
-                'lead_sheet_id' => $this->sheetFilter,
-                'lead_date' => now()->toDateString(),
-                'status' => 'no response',
-                'name' => $row['name'],
-                'email' => $row['email'] ?? null,
-                'services' => $row['services'] ?? null,
-                'phone' => $row['phone'] ?? null,
-                'location' => $row['location'] ?? null,
-                'position' => $row['position'] ?? null,
-                'platform' => $row['platform'] ?? null,
-                'linkedin' => $row['linkedin'] ?? null,
-                'detail' => $row['detail'] ?? null,
-                'web_link' => $row['web_link'] ?? null,
-            ]);
-
-            $salesUsers = User::whereIn('role', ['sales', 'upsale', 'front_sale'])->get();
-            foreach ($salesUsers as $user) {
-                \App\Models\Notification::create([
-                    'user_id' => $user->id,
-                    'lead_id' => $lead->id,
-                    'type' => 'new_lead',
-                    'message' => "New lead '{$lead->name}' has been added by " . auth()->user()->name,
-                ]);
+            $allowed = ['name', 'email', 'services', 'phone', 'location', 'position', 'platform', 'linkedin', 'detail', 'web_link'];
+            if (!in_array($field, $allowed, true)) {
+                return;
             }
 
-            $this->leadsData[$index]['id'] = $lead->id;
-            $this->dispatch('lead-created');
-            $this->ensureEmptyRow();
-            $this->pendingCreates[$index] = false;
-            return;
+            $row = $this->leadsData[$index] ?? null;
+            if (!$row) {
+                return;
+            }
+
+            // Trim value
+            $value = is_string($value) ? trim($value) : $value;
+
+            if ($field === 'name' && $row['id'] && $value === '') {
+                try {
+                    Lead::where('id', $row['id'])
+                        ->where('created_by', auth()->id())
+                        ->delete();
+                    array_splice($this->leadsData, (int) $index, 1);
+                    $this->ensureEmptyRow();
+                    $this->dispatch('lead-updated');
+                } catch (\Exception $e) {
+                    \Illuminate\Support\Facades\Log::error('Error deleting lead: ' . $e->getMessage());
+                    $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to delete lead.']);
+                }
+                return;
+            }
+
+            if ($field === 'email' && $value && !filter_var($value, FILTER_VALIDATE_EMAIL)) {
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Invalid email format.']);
+                return;
+            }
+
+            if (empty($row['id'])) {
+                if (empty($row['name'])) {
+                    return;
+                }
+
+                if (!empty($this->pendingCreates[$index])) {
+                    return;
+                }
+
+                $this->pendingCreates[$index] = true;
+
+                try {
+                    $existingLead = Lead::where('created_by', auth()->id())
+                        ->where('lead_sheet_id', $this->sheetFilter)
+                        ->where('name', $row['name'])
+                        ->whereDate('lead_date', now()->toDateString())
+                        ->orderBy('created_at', 'desc')
+                        ->first();
+
+                    if ($existingLead) {
+                        $this->leadsData[$index]['id'] = $existingLead->id;
+                        $this->pendingCreates[$index] = false;
+                        return;
+                    }
+
+                    $lead = Lead::create([
+                        'created_by' => auth()->id(),
+                        'lead_sheet_id' => $this->sheetFilter,
+                        'lead_date' => now()->toDateString(),
+                        'status' => 'no response',
+                        'name' => trim($row['name']),
+                        'email' => !empty($row['email']) ? trim($row['email']) : null,
+                        'services' => !empty($row['services']) ? trim($row['services']) : null,
+                        'phone' => !empty($row['phone']) ? trim($row['phone']) : null,
+                        'location' => !empty($row['location']) ? trim($row['location']) : null,
+                        'position' => !empty($row['position']) ? trim($row['position']) : null,
+                        'platform' => !empty($row['platform']) ? trim($row['platform']) : null,
+                        'linkedin' => !empty($row['linkedin']) ? trim($row['linkedin']) : null,
+                        'detail' => !empty($row['detail']) ? trim($row['detail']) : null,
+                        'web_link' => !empty($row['web_link']) ? trim($row['web_link']) : null,
+                    ]);
+
+                    // Notify sales users efficiently
+                    $salesUsers = User::whereIn('role', ['sales', 'upsale', 'front_sale'])->get();
+                    
+                    if ($salesUsers->isNotEmpty()) {
+                        $notifications = $salesUsers->map(function ($user) use ($lead) {
+                            return [
+                                'user_id' => $user->id,
+                                'lead_id' => $lead->id,
+                                'type' => 'new_lead',
+                                'message' => "New lead '{$lead->name}' has been added by " . auth()->user()->name,
+                                'read' => false,
+                                'created_at' => now(),
+                                'updated_at' => now(),
+                            ];
+                        })->toArray();
+
+                        \App\Models\Notification::insert($notifications);
+                    }
+
+                    $this->leadsData[$index]['id'] = $lead->id;
+                    $this->dispatch('lead-created');
+                    $this->ensureEmptyRow();
+                    $this->pendingCreates[$index] = false;
+                } catch (\Exception $e) {
+                    \Illuminate\Support\Facades\Log::error('Error creating lead in table: ' . $e->getMessage());
+                    $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to save lead. Please try again.']);
+                    $this->pendingCreates[$index] = false;
+                }
+                return;
+            }
+
+            // Update existing lead
+            try {
+                Lead::where('id', $row['id'])
+                    ->where('created_by', auth()->id())
+                    ->update([$field => $value]);
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::error('Error updating lead: ' . $e->getMessage());
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to update lead.']);
+            }
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Error in updatedLeadsData: ' . $e->getMessage());
         }
-
-        Lead::where('id', $row['id'])
-            ->where('created_by', auth()->id())
-            ->update([$field => $value]);
     }
 
     public function loadSheetLeads()
     {
-        if (!auth()->user()->isScrapper() || !$this->sheetFilter) {
+        try {
+            if (!auth()->check() || !auth()->user()->isScrapper() || !$this->sheetFilter) {
+                $this->leadsData = [$this->emptyRow()];
+                return;
+            }
+
+            // Verify sheet exists and belongs to user
+            $sheet = LeadSheet::where('id', $this->sheetFilter)
+                ->where('created_by', auth()->id())
+                ->exists();
+
+            if (!$sheet) {
+                $this->leadsData = [$this->emptyRow()];
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Selected sheet not found or access denied.']);
+                return;
+            }
+
+            $this->leadsData = Lead::where('created_by', auth()->id())
+                ->where('lead_sheet_id', $this->sheetFilter)
+                ->orderBy('created_at', 'desc')
+                ->get()
+                ->map(function ($lead) {
+                    return [
+                        'id' => $lead->id,
+                        'name' => $lead->name ?? '',
+                        'email' => $lead->email ?? '',
+                        'services' => $lead->services ?? '',
+                        'phone' => $lead->phone ?? '',
+                        'location' => $lead->location ?? '',
+                        'position' => $lead->position ?? '',
+                        'platform' => $lead->platform ?? '',
+                        'linkedin' => $lead->linkedin ?? '',
+                        'detail' => $lead->detail ?? '',
+                        'web_link' => $lead->web_link ?? '',
+                    ];
+                })
+                ->values()
+                ->all();
+
+            $this->ensureEmptyRow();
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Error loading sheet leads: ' . $e->getMessage());
             $this->leadsData = [$this->emptyRow()];
-            return;
+            $this->dispatch('show-toast', type: 'error', message: 'Failed to load leads. Please try again.');
         }
-
-        $this->leadsData = Lead::where('created_by', auth()->id())
-            ->where('lead_sheet_id', $this->sheetFilter)
-            ->orderBy('created_at', 'desc')
-            ->get()
-            ->map(function ($lead) {
-                return [
-                    'id' => $lead->id,
-                    'name' => $lead->name,
-                    'email' => $lead->email,
-                    'services' => $lead->services,
-                    'phone' => $lead->phone,
-                    'location' => $lead->location,
-                    'position' => $lead->position,
-                    'platform' => $lead->platform,
-                    'linkedin' => $lead->linkedin,
-                    'detail' => $lead->detail,
-                    'web_link' => $lead->web_link,
-                ];
-            })
-            ->values()
-            ->all();
-
-        $this->ensureEmptyRow();
     }
 
     public function ensureEmptyRow()
@@ -220,65 +274,89 @@ new class extends Component
         ];
     }
 
-    public function render()
+    public function mount()
     {
-        if (auth()->user()->isScrapper() && empty($this->leadsData)) {
+        // Set view mode from query parameter
+        if (request()->has('viewMode') && in_array(request()->get('viewMode'), ['table', 'list'])) {
+            $this->viewMode = request()->get('viewMode');
+        }
+        
+        // Load sheet leads only for table view
+        if (auth()->check() && auth()->user()->isScrapper() && $this->viewMode === 'table' && empty($this->leadsData)) {
             $this->loadSheetLeads();
         }
+    }
 
-        $query = Lead::with(['creator', 'opener'])
-            ->orderBy('created_at', 'desc');
+    public function render()
+    {
+        try {
+            // Load sheet leads data only for table view
+            if (auth()->check() && auth()->user()->isScrapper() && $this->viewMode === 'table' && empty($this->leadsData)) {
+                $this->loadSheetLeads();
+            }
 
-        // Apply role-based filtering
-        if (auth()->user()->isScrapper()) {
-            $query->where('created_by', auth()->id());
+            $query = Lead::with(['creator', 'opener'])
+                ->orderBy('created_at', 'desc');
+
+            // Apply role-based filtering
+            if (auth()->check() && auth()->user()->isScrapper()) {
+                $query->where('created_by', auth()->id());
+            }
+
+            // Apply search filter
+            if ($this->search) {
+                $searchTerm = '%' . trim($this->search) . '%';
+                $query->where(function($q) use ($searchTerm) {
+                    $q->where('name', 'like', $searchTerm)
+                      ->orWhere('email', 'like', $searchTerm)
+                      ->orWhere('phone', 'like', $searchTerm)
+                      ->orWhere('company', 'like', $searchTerm)
+                      ->orWhere('services', 'like', $searchTerm)
+                      ->orWhere('location', 'like', $searchTerm)
+                      ->orWhere('position', 'like', $searchTerm)
+                      ->orWhere('platform', 'like', $searchTerm)
+                      ->orWhere('linkedin', 'like', $searchTerm)
+                      ->orWhere('detail', 'like', $searchTerm)
+                      ->orWhere('web_link', 'like', $searchTerm);
+                });
+            }
+
+            // Apply status filter
+            if ($this->statusFilter) {
+                $query->where('status', $this->statusFilter);
+            }
+
+            // Apply sheet filter
+            if ($this->sheetFilter) {
+                $query->where('lead_sheet_id', $this->sheetFilter);
+            } elseif (auth()->check() && auth()->user()->isScrapper() && $this->viewMode === 'list') {
+                // For list view, show all leads if no sheet filter, but for table view, require sheet filter
+                // This is already handled in the view logic
+            }
+
+            $leads = $query->paginate(10);
+
+            $sheetsQuery = LeadSheet::orderBy('created_at', 'desc');
+            if (auth()->check() && auth()->user()->isScrapper()) {
+                $sheetsQuery->where('created_by', auth()->id());
+            }
+
+            return view('components.leads.⚡index', [
+                'leads' => $leads,
+                'sheets' => $sheetsQuery->get(),
+            ]);
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Error rendering leads index: ' . $e->getMessage());
+            return view('components.leads.⚡index', [
+                'leads' => \Illuminate\Pagination\LengthAwarePaginator::empty(),
+                'sheets' => collect([]),
+            ]);
         }
-
-        // Apply search filter
-        if ($this->search) {
-            $query->where(function($q) {
-                $q->where('name', 'like', '%' . $this->search . '%')
-                  ->orWhere('email', 'like', '%' . $this->search . '%')
-                  ->orWhere('phone', 'like', '%' . $this->search . '%')
-                  ->orWhere('company', 'like', '%' . $this->search . '%')
-                  ->orWhere('services', 'like', '%' . $this->search . '%')
-                  ->orWhere('location', 'like', '%' . $this->search . '%')
-                  ->orWhere('position', 'like', '%' . $this->search . '%')
-                  ->orWhere('platform', 'like', '%' . $this->search . '%')
-                  ->orWhere('linkedin', 'like', '%' . $this->search . '%')
-                  ->orWhere('detail', 'like', '%' . $this->search . '%')
-                  ->orWhere('web_link', 'like', '%' . $this->search . '%');
-            });
-        }
-
-        // Apply status filter
-        if ($this->statusFilter) {
-            $query->where('status', $this->statusFilter);
-        }
-
-        // Apply sheet filter
-        if ($this->sheetFilter) {
-            $query->where('lead_sheet_id', $this->sheetFilter);
-        } elseif (auth()->user()->isScrapper()) {
-            $query->whereRaw('1 = 0');
-        }
-
-        $leads = $query->paginate(10);
-
-        $sheetsQuery = LeadSheet::orderBy('created_at', 'desc');
-        if (auth()->user()->isScrapper()) {
-            $sheetsQuery->where('created_by', auth()->id());
-        }
-
-        return view('components.leads.⚡index', [
-            'leads' => $leads,
-            'sheets' => $sheetsQuery->get(),
-        ]);
     }
 };
 ?>
 
-<div class="max-w-9xl mx-auto px-4 sm:px-6 lg:px-8 py-6" wire:poll.3s="refreshLeadsData">
+<div class="max-w-9xl mx-auto px-4 sm:px-6 lg:px-8 py-6" wire:poll.5s="refreshLeadsData">
     <!-- Header -->
     <div class="mb-6">
         <div class="flex justify-between items-center">
@@ -354,8 +432,44 @@ new class extends Component
         @error('sheetFilter') <span class="text-red-500 text-sm mt-2 block">{{ $message }}</span> @enderror
     </div>
 
-    <!-- Leads Table -->
+    <!-- View Mode Toggle for Scrapper -->
     @if(auth()->user()->isScrapper())
+        <div class="mb-4 flex justify-end">
+            <div class="inline-flex rounded-lg border border-gray-300 bg-white shadow-sm">
+                @php
+                    $queryParams = request()->query();
+                    $queryParams['viewMode'] = 'table';
+                    if (!isset($queryParams['sheetFilter']) && $sheetFilter) {
+                        $queryParams['sheetFilter'] = $sheetFilter;
+                    }
+                @endphp
+                <a 
+                    href="{{ route('leads.index', $queryParams) }}"
+                    class="px-4 py-2 text-sm font-semibold rounded-l-lg transition-colors {{ $viewMode === 'table' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-50' }}"
+                >
+                    <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                    </svg>
+                    Table View
+                </a>
+                @php
+                    $queryParams['viewMode'] = 'list';
+                @endphp
+                <a 
+                    href="{{ route('leads.index', $queryParams) }}"
+                    class="px-4 py-2 text-sm font-semibold rounded-r-lg transition-colors {{ $viewMode === 'list' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-50' }}"
+                >
+                    <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"></path>
+                    </svg>
+                    List View
+                </a>
+            </div>
+        </div>
+    @endif
+
+    <!-- Leads Table View (for Scrapper when viewMode is 'table') -->
+    @if(auth()->user()->isScrapper() && $viewMode === 'table')
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
             <div class="overflow-x-auto">
                 <table class="min-w-full divide-y divide-gray-200">
@@ -418,7 +532,104 @@ new class extends Component
                 </table>
             </div>
         </div>
-    @else
+    @elseif(auth()->user()->isScrapper() && $viewMode === 'list')
+        <!-- List View for Scrapper (same as sales team view) -->
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Lead</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Contact</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Company</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Status</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Opened By</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Created By</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white divide-y divide-gray-200">
+                        @forelse($leads as $lead)
+                            <tr class="hover:bg-gray-50 transition-colors">
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="flex items-center">
+                                        <div class="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold text-sm mr-3">
+                                            {{ strtoupper(substr($lead->name, 0, 1)) }}
+                                        </div>
+                                        <a href="{{ route('leads.show', $lead->id) }}" class="text-sm font-semibold text-gray-900 hover:text-blue-600 transition-colors">
+                                            {{ $lead->name }}
+                                        </a>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="text-sm font-medium text-gray-900">{{ $lead->email ?? 'N/A' }}</div>
+                                    <div class="text-xs text-gray-500">{{ $lead->phone ?? 'N/A' }}</div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="text-sm font-medium text-gray-900">{{ $lead->company ?? 'N/A' }}</div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    @php
+                                    $statusColors = [
+                                        'wrong number' => 'bg-red-100 text-red-700',
+                                        'follow up' => 'bg-amber-100 text-amber-700',
+                                        'hired us' => 'bg-emerald-100 text-emerald-700',
+                                        'hired someone' => 'bg-purple-100 text-purple-700',
+                                        'no response' => 'bg-gray-100 text-gray-700',
+                                    ];
+                                @endphp
+                                <span class="px-3 py-1 text-xs font-semibold rounded-full {{ $statusColors[$lead->status] ?? 'bg-gray-100 text-gray-700' }}">
+                                    {{ ucwords($lead->status) }}
+                                </span>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    @if($lead->opener)
+                                        <div class="flex items-center">
+                                            <div class="w-8 h-8 bg-emerald-500 rounded-full flex items-center justify-center text-white text-xs font-bold mr-2">
+                                                {{ strtoupper(substr($lead->opener->name, 0, 1)) }}
+                                            </div>
+                                            <div>
+                                                <div class="text-sm font-medium text-gray-900">{{ $lead->opener->name }}</div>
+                                                <div class="text-xs text-gray-500">{{ $lead->opened_at?->format('M d, H:i') }}</div>
+                                            </div>
+                                        </div>
+                                    @else
+                                        <span class="text-sm text-gray-400 italic">Not opened</span>
+                                    @endif
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="text-sm font-medium text-gray-900">{{ $lead->creator->name }}</div>
+                                    <div class="text-xs text-gray-500">{{ $lead->created_at->format('M d, Y') }}</div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <a href="{{ route('leads.show', $lead->id) }}" class="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors">
+                                        View
+                                        <svg class="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                                        </svg>
+                                    </a>
+                                </td>
+                            </tr>
+                        @empty
+                            <tr>
+                                <td colspan="7" class="px-6 py-12 text-center">
+                                    <svg class="w-16 h-16 mx-auto text-gray-300 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
+                                    </svg>
+                                    <p class="text-gray-500 font-medium">No leads found</p>
+                                    <p class="text-gray-400 text-sm mt-1">Try adjusting your search or filters</p>
+                                </td>
+                            </tr>
+                        @endforelse
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <!-- Pagination for List View -->
+        <div class="mt-6">
+            {{ $leads->links() }}
+        </div>
+    @elseif(!auth()->user()->isScrapper())
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
             <div class="overflow-x-auto">
                 <table class="min-w-full divide-y divide-gray-200">

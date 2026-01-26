@@ -25,16 +25,28 @@ new class extends Component
 
     public function loadNotifications()
     {
-        $this->unreadCount = Notification::where('user_id', auth()->id())
-            ->where('read', false)
-            ->count();
-        
-        $this->notifications = Notification::where('user_id', auth()->id())
-            ->with('lead')
-            ->orderBy('created_at', 'desc')
-            ->limit(10)
-            ->get()
-            ->toArray();
+        try {
+            if (!auth()->check()) {
+                $this->unreadCount = 0;
+                $this->notifications = [];
+                return;
+            }
+
+            $this->unreadCount = Notification::where('user_id', auth()->id())
+                ->where('read', false)
+                ->count();
+            
+            $this->notifications = Notification::where('user_id', auth()->id())
+                ->with('lead')
+                ->orderBy('created_at', 'desc')
+                ->limit(10)
+                ->get()
+                ->toArray();
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Error loading notifications: ' . $e->getMessage());
+            $this->unreadCount = 0;
+            $this->notifications = [];
+        }
     }
 
     public function toggleDropdown()
@@ -44,26 +56,42 @@ new class extends Component
 
     public function markAsRead($notificationId)
     {
-        $notification = Notification::find($notificationId);
-        if ($notification && $notification->user_id === auth()->id()) {
-            $notification->markAsRead();
-            $this->loadNotifications();
+        try {
+            if (!auth()->check()) {
+                return;
+            }
+
+            $notification = Notification::find($notificationId);
+            if ($notification && $notification->user_id === auth()->id()) {
+                $notification->markAsRead();
+                $this->loadNotifications();
+            }
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Error marking notification as read: ' . $e->getMessage());
         }
     }
 
     public function markAllAsRead()
     {
-        Notification::where('user_id', auth()->id())
-            ->where('read', false)
-            ->update(['read' => true]);
-        $this->loadNotifications();
+        try {
+            if (!auth()->check()) {
+                return;
+            }
+
+            Notification::where('user_id', auth()->id())
+                ->where('read', false)
+                ->update(['read' => true]);
+            $this->loadNotifications();
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Error marking all notifications as read: ' . $e->getMessage());
+        }
     }
 
     // No render method needed for anonymous components
 };
 ?>
 
-<div class="relative" x-data="{ open: false }" wire:poll.3s="loadNotifications">
+<div class="relative" x-data="{ open: false }" wire:poll.5s="loadNotifications">
     <button 
         @click="open = !open"
         type="button"

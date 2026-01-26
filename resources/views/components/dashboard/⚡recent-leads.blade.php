@@ -23,10 +23,26 @@ new class extends Component
 
     public function loadLeads()
     {
-        $this->recentLeads = Lead::with(['creator', 'opener'])
-            ->orderBy('created_at', 'desc')
-            ->limit(5)
-            ->get();
+        try {
+            if (!auth()->check()) {
+                $this->recentLeads = [];
+                return;
+            }
+
+            $query = Lead::with(['creator', 'opener'])
+                ->orderBy('created_at', 'desc')
+                ->limit(5);
+
+            // Apply role-based filtering
+            if (auth()->user()->isScrapper()) {
+                $query->where('created_by', auth()->id());
+            }
+
+            $this->recentLeads = $query->get();
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Error loading recent leads: ' . $e->getMessage());
+            $this->recentLeads = [];
+        }
     }
 
     public function render()
@@ -36,7 +52,7 @@ new class extends Component
 };
 ?>
 
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mt-6" wire:poll.3s="loadLeads">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mt-6" wire:poll.5s="loadLeads">
     <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
         <h2 class="text-lg font-semibold text-gray-900 flex items-center">
             <svg class="w-5 h-5 mr-2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">

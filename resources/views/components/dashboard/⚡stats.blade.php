@@ -25,22 +25,43 @@ new class extends Component
 
     public function loadStats()
     {
-        $query = Lead::query();
-        
-        if (auth()->user()->isScrapper()) {
-            $query->where('created_by', auth()->id());
-        }
+        try {
+            if (!auth()->check()) {
+                $this->total = 0;
+                $this->followUp = 0;
+                $this->noResponse = 0;
+                return;
+            }
 
-        $this->total = $query->count();
-        $this->followUp = (clone $query)->where('status', 'follow up')->count();
-        $this->noResponse = (clone $query)->where('status', 'no response')->count();
+            $baseQuery = Lead::query();
+            
+            if (auth()->user()->isScrapper()) {
+                $baseQuery->where('created_by', auth()->id());
+            }
+
+            // Optimize: Use single query with conditional aggregation
+            $stats = $baseQuery->selectRaw('
+                COUNT(*) as total,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as follow_up,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as no_response
+            ', ['follow up', 'no response'])->first();
+
+            $this->total = (int) ($stats->total ?? 0);
+            $this->followUp = (int) ($stats->follow_up ?? 0);
+            $this->noResponse = (int) ($stats->no_response ?? 0);
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Error loading stats: ' . $e->getMessage());
+            $this->total = 0;
+            $this->followUp = 0;
+            $this->noResponse = 0;
+        }
     }
 
     // No render method needed for anonymous components
 };
 ?>
 
-<div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6" wire:poll.3s="loadStats">
+<div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6" wire:poll.5s="loadStats">
     <!-- Total Leads Card -->
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:shadow-md transition-shadow">
         <div class="flex items-center justify-between">

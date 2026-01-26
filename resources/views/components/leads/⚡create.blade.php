@@ -2,8 +2,11 @@
 
 use App\Models\Lead;
 use App\Models\User;
+use App\Models\LeadSheet;
 use Livewire\Component;
 use Livewire\Attributes\On;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 new class extends Component
 {
@@ -18,6 +21,8 @@ new class extends Component
     public $notes = '';
     public $lead_sheet_id = '';
     public $showModal = false;
+    public $isSaving = false;
+    public $sheets = [];
 
     protected $rules = [
         'name' => 'required|string|max:255',
@@ -32,11 +37,22 @@ new class extends Component
         'lead_sheet_id' => 'nullable|exists:lead_sheets,id',
     ];
 
+    public function mount()
+    {
+        $this->loadSheets();
+    }
+
     #[On('open-create-modal')]
     public function openModal()
     {
-        $this->showModal = true;
-        $this->resetForm();
+        try {
+            $this->showModal = true;
+            $this->resetForm();
+            $this->loadSheets();
+        } catch (\Exception $e) {
+            Log::error('Error opening create modal: ' . $e->getMessage());
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to open form. Please try again.']);
+        }
     }
 
     public function closeModal()
@@ -49,67 +65,141 @@ new class extends Component
     {
         $this->reset(['name', 'email', 'phone', 'lead_date', 'services', 'budget', 'credits', 'detail', 'notes', 'lead_sheet_id']);
         $this->resetErrorBag();
+        $this->isSaving = false;
     }
 
     #[On('sheet-created')]
     public function refreshSheets()
     {
+        try {
+            $this->loadSheets();
+        } catch (\Exception $e) {
+            Log::error('Error refreshing sheets: ' . $e->getMessage());
+        }
+    }
+
+    public function loadSheets()
+    {
+        try {
+            if (auth()->check() && auth()->user()->canCreateSheets()) {
+                $this->sheets = LeadSheet::where('created_by', auth()->id())
+                    ->orderBy('created_at', 'desc')
+                    ->get();
+            } else {
+                $this->sheets = [];
+            }
+        } catch (\Exception $e) {
+            Log::error('Error loading sheets: ' . $e->getMessage());
+            $this->sheets = [];
+        }
     }
 
     public function save()
     {
-        if (!auth()->user()->canCreateLeads()) {
-            abort(403);
-        }
+        try {
+            $this->isSaving = true;
 
-        $rules = $this->rules;
-        if (auth()->user()->isScrapper()) {
-            $rules['lead_sheet_id'] = 'required|exists:lead_sheets,id';
-        }
-        $this->validate($rules);
+            if (!auth()->check()) {
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'You must be logged in to create leads.']);
+                $this->isSaving = false;
+                return;
+            }
 
-        $leadData = [
-            'created_by' => auth()->id(),
-            'name' => $this->name,
-            'email' => $this->email,
-            'phone' => $this->phone,
-            'lead_date' => $this->lead_date ?: null,
-            'services' => $this->services,
-            'budget' => $this->budget,
-            'credits' => $this->credits,
-            'detail' => $this->detail,
-            'notes' => $this->notes,
-            'status' => 'no response',
-        ];
+            if (!auth()->user()->canCreateLeads()) {
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'You do not have permission to create leads.']);
+                $this->isSaving = false;
+                return;
+            }
 
-        if ($this->lead_sheet_id) {
-            $leadData['lead_sheet_id'] = $this->lead_sheet_id;
-        }
+            $rules = $this->rules;
+            if (auth()->user()->isScrapper()) {
+                $rules['lead_sheet_id'] = 'required|exists:lead_sheets,id';
+            }
+            
+            $this->validate($rules);
 
-        $lead = Lead::create($leadData);
+            DB::beginTransaction();
 
-        // Notify all sales users
-        $salesUsers = User::whereIn('role', ['sales', 'upsale', 'front_sale'])->get();
-        foreach ($salesUsers as $user) {
-            \App\Models\Notification::create([
-                'user_id' => $user->id,
-                'lead_id' => $lead->id,
-                'type' => 'new_lead',
-                'message' => "New lead '{$lead->name}' has been added by " . auth()->user()->name,
+            try {
+                $leadData = [
+                    'created_by' => auth()->id(),
+                    'name' => trim($this->name),
+                    'email' => $this->email ? trim($this->email) : null,
+                    'phone' => $this->phone ? trim($this->phone) : null,
+                    'lead_date' => $this->lead_date ?: null,
+                    'services' => $this->services ? trim($this->services) : null,
+                    'budget' => $this->budget ? trim($this->budget) : null,
+                    'credits' => $this->credits ? trim($this->credits) : null,
+                    'detail' => $this->detail ? trim($this->detail) : null,
+                    'notes' => $this->notes ? trim($this->notes) : null,
+                    'status' => 'no response',
+                ];
+
+                if ($this->lead_sheet_id) {
+                    // Verify sheet exists and belongs to user
+                    $sheet = LeadSheet::where('id', $this->lead_sheet_id)
+                        ->where('created_by', auth()->id())
+                        ->first();
+                    
+                    if (!$sheet) {
+                        throw new \Exception('Selected sheet not found or access denied.');
+                    }
+                    
+                    $leadData['lead_sheet_id'] = $this->lead_sheet_id;
+                }
+
+                $lead = Lead::create($leadData);
+
+                // Notify all sales users efficiently
+                $salesUsers = User::whereIn('role', ['sales', 'upsale', 'front_sale'])->get();
+                
+                if ($salesUsers->isNotEmpty()) {
+                    $notifications = $salesUsers->map(function ($user) use ($lead) {
+                        return [
+                            'user_id' => $user->id,
+                            'lead_id' => $lead->id,
+                            'type' => 'new_lead',
+                            'message' => "New lead '{$lead->name}' has been added by " . auth()->user()->name,
+                            'read' => false,
+                            'created_at' => now(),
+                            'updated_at' => now(),
+                        ];
+                    })->toArray();
+
+                    \App\Models\Notification::insert($notifications);
+                }
+
+                DB::commit();
+
+                // Dispatch events to refresh leads list and notifications
+                $this->dispatch('lead-created');
+                
+                // Reset form
+                $this->resetForm();
+                
+                // Close modal
+                $this->closeModal();
+                
+                // Show success message
+                $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Lead created successfully! Sales team has been notified.']);
+                request()->session()->flash('message', 'Lead created successfully! Sales team has been notified.');
+
+            } catch (\Exception $e) {
+                DB::rollBack();
+                throw $e;
+            }
+
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            $this->isSaving = false;
+            throw $e;
+        } catch (\Exception $e) {
+            $this->isSaving = false;
+            Log::error('Error creating lead: ' . $e->getMessage(), [
+                'user_id' => auth()->id(),
+                'trace' => $e->getTraceAsString()
             ]);
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to create lead. Please try again.']);
         }
-
-        // Dispatch events to refresh leads list and notifications
-        $this->dispatch('lead-created');
-        
-        // Reset form
-        $this->resetForm();
-        
-        // Close modal
-        $this->closeModal();
-        
-        // Set session flash message - this will work with Livewire
-        request()->session()->flash('message', 'Lead created successfully! Sales team has been notified.');
     }
 
     // No render method needed for anonymous components
@@ -191,10 +281,11 @@ new class extends Component
                                 <select
                                     id="lead_sheet_id"
                                     wire:model="lead_sheet_id"
-                                    class="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white @error('lead_sheet_id') border-red-500 @enderror"
+                                    wire:loading.attr="disabled"
+                                    class="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white @error('lead_sheet_id') border-red-500 @enderror disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
                                     <option value="">Select a sheet...</option>
-                                    @foreach(\App\Models\LeadSheet::where('created_by', auth()->id())->orderBy('created_at', 'desc')->get() as $sheet)
+                                    @foreach($sheets as $sheet)
                                         <option value="{{ $sheet->id }}">{{ $sheet->name }}</option>
                                     @endforeach
                                 </select>
@@ -209,8 +300,9 @@ new class extends Component
                             <input 
                                 type="text" 
                                 id="name"
-                                wire:model="name" 
-                                class="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white @error('name') border-red-500 @enderror"
+                                wire:model="name"
+                                wire:loading.attr="disabled"
+                                class="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white @error('name') border-red-500 @enderror disabled:opacity-50 disabled:cursor-not-allowed"
                                 placeholder="Enter lead name"
                             >
                             @error('name') <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> @enderror
@@ -328,9 +420,18 @@ new class extends Component
                         </button>
                         <button 
                             type="submit" 
-                            class="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold shadow-sm hover:shadow-md transition-all"
+                            wire:loading.attr="disabled"
+                            wire:target="save"
+                            class="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center space-x-2 min-w-[120px]"
                         >
-                            Create Lead
+                            <span wire:loading.remove wire:target="save">Create Lead</span>
+                            <span wire:loading wire:target="save" class="flex items-center space-x-2">
+                                <svg class="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                                <span>Saving...</span>
+                            </span>
                         </button>
                     </div>
                 </form>
