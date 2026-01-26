@@ -10,7 +10,11 @@ new class extends Component
     public $name = '';
     public $email = '';
     public $phone = '';
-    public $company = '';
+    public $lead_date = '';
+    public $services = '';
+    public $budget = '';
+    public $credits = '';
+    public $detail = '';
     public $notes = '';
     public $lead_sheet_id = '';
     public $showModal = false;
@@ -19,7 +23,11 @@ new class extends Component
         'name' => 'required|string|max:255',
         'email' => 'nullable|email|max:255',
         'phone' => 'nullable|string|max:255',
-        'company' => 'nullable|string|max:255',
+        'lead_date' => 'nullable|date',
+        'services' => 'nullable|string|max:255',
+        'budget' => 'nullable|string|max:255',
+        'credits' => 'nullable|string|max:255',
+        'detail' => 'nullable|string',
         'notes' => 'nullable|string',
         'lead_sheet_id' => 'nullable|exists:lead_sheets,id',
     ];
@@ -39,7 +47,7 @@ new class extends Component
 
     public function resetForm()
     {
-        $this->reset(['name', 'email', 'phone', 'company', 'notes', 'lead_sheet_id']);
+        $this->reset(['name', 'email', 'phone', 'lead_date', 'services', 'budget', 'credits', 'detail', 'notes', 'lead_sheet_id']);
         $this->resetErrorBag();
     }
 
@@ -65,7 +73,11 @@ new class extends Component
             'name' => $this->name,
             'email' => $this->email,
             'phone' => $this->phone,
-            'company' => $this->company,
+            'lead_date' => $this->lead_date ?: null,
+            'services' => $this->services,
+            'budget' => $this->budget,
+            'credits' => $this->credits,
+            'detail' => $this->detail,
             'notes' => $this->notes,
             'status' => 'no response',
         ];
@@ -129,12 +141,12 @@ new class extends Component
             x-transition:leave="ease-in duration-200"
             x-transition:leave-start="opacity-100"
             x-transition:leave-end="opacity-0"
-            class="fixed inset-0 bg-gray-900 bg-opacity-50 transition-opacity"
+            class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm transition-opacity"
             @click="close()"
         ></div>
 
         <!-- Modal -->
-        <div class="flex min-h-full items-center justify-center p-4">
+        <div class="flex min-h-full items-center justify-center p-4 sm:p-6">
             <div 
                 x-show="show"
                 x-transition:enter="ease-out duration-300"
@@ -144,10 +156,10 @@ new class extends Component
                 x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
                 x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
                 @click.away="close()"
-                class="relative transform overflow-hidden rounded-lg bg-white shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-2xl"
+                class="relative w-full transform overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/5 transition-all sm:my-8 sm:max-w-3xl"
             >
                 <!-- Modal Header -->
-                <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
+                <div class="bg-gradient-to-r from-slate-50 via-white to-slate-50 px-6 py-5 border-b border-gray-200">
                     <div class="flex items-center justify-between">
                         <div>
                             <h3 class="text-xl font-bold text-gray-900">Create New Lead</h3>
@@ -156,7 +168,7 @@ new class extends Component
                         <button 
                             wire:click="closeModal"
                             type="button"
-                            class="text-gray-400 hover:text-gray-500 transition-colors p-1 rounded-lg hover:bg-gray-200"
+                            class="text-gray-400 hover:text-gray-600 transition-colors p-2 rounded-full hover:bg-white/70"
                         >
                             <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
@@ -166,8 +178,8 @@ new class extends Component
                 </div>
 
                 <!-- Modal Body -->
-                <form wire:submit="save" class="bg-white px-6 py-6">
-                    <div class="space-y-5">
+                <form wire:submit="save" class="bg-white px-6 sm:px-8 py-6 sm:py-7">
+                    <div class="space-y-6 max-h-[70vh] overflow-y-auto pr-1">
                         @if(auth()->user()->canCreateSheets())
                             <div>
                                 <label for="lead_sheet_id" class="block text-sm font-semibold text-gray-700 mb-2">
@@ -179,7 +191,7 @@ new class extends Component
                                 <select
                                     id="lead_sheet_id"
                                     wire:model="lead_sheet_id"
-                                    class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 @error('lead_sheet_id') border-red-500 @enderror"
+                                    class="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white @error('lead_sheet_id') border-red-500 @enderror"
                                 >
                                     <option value="">Select a sheet...</option>
                                     @foreach(\App\Models\LeadSheet::where('created_by', auth()->id())->orderBy('created_at', 'desc')->get() as $sheet)
@@ -198,7 +210,7 @@ new class extends Component
                                 type="text" 
                                 id="name"
                                 wire:model="name" 
-                                class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 @error('name') border-red-500 @enderror"
+                                class="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white @error('name') border-red-500 @enderror"
                                 placeholder="Enter lead name"
                             >
                             @error('name') <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> @enderror
@@ -211,7 +223,7 @@ new class extends Component
                                     type="email" 
                                     id="email"
                                     wire:model="email" 
-                                    class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 @error('email') border-red-500 @enderror"
+                                    class="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white @error('email') border-red-500 @enderror"
                                     placeholder="email@example.com"
                                 >
                                 @error('email') <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> @enderror
@@ -223,7 +235,7 @@ new class extends Component
                                     type="text" 
                                     id="phone"
                                     wire:model="phone" 
-                                    class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 @error('phone') border-red-500 @enderror"
+                                    class="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white @error('phone') border-red-500 @enderror"
                                     placeholder="+1 (555) 000-0000"
                                 >
                                 @error('phone') <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> @enderror
@@ -231,42 +243,92 @@ new class extends Component
                         </div>
 
                         <div>
-                            <label for="company" class="block text-sm font-semibold text-gray-700 mb-2">Company</label>
+                            <label for="lead_date" class="block text-sm font-semibold text-gray-700 mb-2">Lead Date</label>
                             <input 
-                                type="text" 
-                                id="company"
-                                wire:model="company" 
-                                class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 @error('company') border-red-500 @enderror"
-                                placeholder="Company name"
+                                type="date" 
+                                id="lead_date"
+                                wire:model="lead_date" 
+                                class="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white @error('lead_date') border-red-500 @enderror"
+                                placeholder="Select lead date"
                             >
-                            @error('company') <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> @enderror
+                            @error('lead_date') <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> @enderror
                         </div>
 
                         <div>
-                            <label for="notes" class="block text-sm font-semibold text-gray-700 mb-2">Notes</label>
+                            <label for="services" class="block text-sm font-semibold text-gray-700 mb-2">Service</label>
+                            <input 
+                                type="text" 
+                                id="services"
+                                wire:model="services" 
+                                class="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white @error('services') border-red-500 @enderror"
+                                placeholder="Service"
+                            >
+                            @error('services') <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> @enderror
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+                            <div>
+                                <label for="budget" class="block text-sm font-semibold text-gray-700 mb-2">Budget</label>
+                                <input 
+                                    type="text" 
+                                    id="budget"
+                                    wire:model="budget" 
+                                    class="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white @error('budget') border-red-500 @enderror"
+                                    placeholder="Budget"
+                                >
+                                @error('budget') <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> @enderror
+                            </div>
+
+                            <div>
+                                <label for="credits" class="block text-sm font-semibold text-gray-700 mb-2">Credits</label>
+                                <input 
+                                    type="text" 
+                                    id="credits"
+                                    wire:model="credits" 
+                                    class="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white @error('credits') border-red-500 @enderror"
+                                    placeholder="Credits"
+                                >
+                                @error('credits') <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> @enderror
+                            </div>
+                        </div>
+
+                        <div>
+                            <label for="detail" class="block text-sm font-semibold text-gray-700 mb-2">Business Description</label>
+                            <textarea 
+                                id="detail"
+                                wire:model="detail" 
+                                rows="4"
+                                class="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none bg-white @error('detail') border-red-500 @enderror"
+                                placeholder="Business description"
+                            ></textarea>
+                            @error('detail') <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> @enderror
+                        </div>
+
+                        <div>
+                            <label for="notes" class="block text-sm font-semibold text-gray-700 mb-2">Additional Comments</label>
                             <textarea 
                                 id="notes"
                                 wire:model="notes" 
                                 rows="4"
-                                class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none @error('notes') border-red-500 @enderror"
-                                placeholder="Additional notes about the lead..."
+                                class="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none bg-white @error('notes') border-red-500 @enderror"
+                                placeholder="Additional comments"
                             ></textarea>
                             @error('notes') <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> @enderror
                         </div>
                     </div>
 
                     <!-- Modal Footer -->
-                    <div class="mt-6 flex gap-4 justify-end">
+                    <div class="mt-6 flex flex-col-reverse sm:flex-row gap-3 sm:justify-end border-t border-gray-100 pt-4">
                         <button 
                             type="button"
                             wire:click="closeModal"
-                            class="px-5 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-semibold transition-colors"
+                            class="px-5 py-2.5 bg-white border border-gray-200 hover:bg-gray-50 text-gray-700 rounded-xl font-semibold transition-colors"
                         >
                             Cancel
                         </button>
                         <button 
                             type="submit" 
-                            class="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold shadow-sm hover:shadow-md transition-all"
+                            class="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold shadow-sm hover:shadow-md transition-all"
                         >
                             Create Lead
                         </button>

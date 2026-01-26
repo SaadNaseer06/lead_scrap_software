@@ -17,6 +17,8 @@ class Lead extends Model
         'phone',
         'company',
         'services',
+        'budget',
+        'credits',
         'location',
         'position',
         'platform',

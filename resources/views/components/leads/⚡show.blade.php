@@ -177,8 +177,20 @@ new class extends Component
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div class="bg-gray-50 p-4 rounded-lg">
-                    <p class="text-xs font-semibold text-gray-600 uppercase mb-2">Services</p>
+                    <p class="text-xs font-semibold text-gray-600 uppercase mb-2">Lead Date</p>
+                    <p class="text-base font-medium text-gray-900">{{ $lead->lead_date?->format('M d, Y') ?? 'N/A' }}</p>
+                </div>
+                <div class="bg-gray-50 p-4 rounded-lg">
+                    <p class="text-xs font-semibold text-gray-600 uppercase mb-2">Service</p>
                     <p class="text-base font-medium text-gray-900">{{ $lead->services ?? 'N/A' }}</p>
+                </div>
+                <div class="bg-gray-50 p-4 rounded-lg">
+                    <p class="text-xs font-semibold text-gray-600 uppercase mb-2">Budget</p>
+                    <p class="text-base font-medium text-gray-900">{{ $lead->budget ?? 'N/A' }}</p>
+                </div>
+                <div class="bg-gray-50 p-4 rounded-lg">
+                    <p class="text-xs font-semibold text-gray-600 uppercase mb-2">Credits</p>
+                    <p class="text-base font-medium text-gray-900">{{ $lead->credits ?? 'N/A' }}</p>
                 </div>
                 <div class="bg-gray-50 p-4 rounded-lg">
                     <p class="text-xs font-semibold text-gray-600 uppercase mb-2">Location</p>
@@ -209,14 +221,14 @@ new class extends Component
                     @endif
                 </div>
                 <div class="bg-gray-50 p-4 rounded-lg md:col-span-2">
-                    <p class="text-xs font-semibold text-gray-600 uppercase mb-2">Detail</p>
+                    <p class="text-xs font-semibold text-gray-600 uppercase mb-2">Business Description</p>
                     <p class="text-base font-medium text-gray-900">{{ $lead->detail ?? 'N/A' }}</p>
                 </div>
             </div>
 
             @if($lead->notes)
                 <div class="bg-blue-50 p-5 rounded-lg border border-blue-200">
-                    <p class="text-xs font-semibold text-blue-700 uppercase mb-2">Notes</p>
+                    <p class="text-xs font-semibold text-blue-700 uppercase mb-2">Additional Comments</p>
                     <p class="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">{{ $lead->notes }}</p>
                 </div>
             @endif
@@ -228,14 +240,18 @@ new class extends Component
                 </div>
 
                 @if($lead->comments->count() > 0)
+                    <div class="grid grid-cols-2 gap-4 text-xs font-semibold text-gray-500 uppercase mb-2 px-1">
+                        <span>Agent Name</span>
+                        <span>Comments</span>
+                    </div>
                     <div class="space-y-4 mb-4">
                         @foreach($lead->comments->sortByDesc('created_at') as $comment)
-                            <div class="border border-gray-200 rounded-lg p-4 bg-gray-50">
-                                <div class="flex items-center justify-between">
+                            <div class="border border-gray-200 rounded-lg p-4 bg-gray-50 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
                                     <p class="text-sm font-semibold text-gray-900">{{ $comment->user->name }}</p>
                                     <p class="text-xs text-gray-500">{{ $comment->created_at->format('M d, Y H:i') }}</p>
                                 </div>
-                                <p class="text-sm text-gray-700 mt-2 whitespace-pre-wrap">{{ $comment->message }}</p>
+                                <p class="text-sm text-gray-700 whitespace-pre-wrap">{{ $comment->message }}</p>
                             </div>
                         @endforeach
                     </div>
