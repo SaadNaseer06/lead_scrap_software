@@ -13,7 +13,7 @@ new class extends Component
 
     public function save()
     {
-        if (!auth()->user()->isScrapper()) {
+        if (!auth()->user()->canCreateSheets()) {
             abort(403);
         }
 

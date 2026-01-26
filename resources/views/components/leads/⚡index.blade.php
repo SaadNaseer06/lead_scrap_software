@@ -15,6 +15,7 @@ new class extends Component
     public $statusFilter = '';
     public $sheetFilter = '';
     public $leadsData = [];
+    public $pendingCreates = [];
     protected $queryString = [
         'sheetFilter' => ['except' => ''],
     ];
@@ -104,6 +105,25 @@ new class extends Component
                 return;
             }
 
+            if (!empty($this->pendingCreates[$index])) {
+                return;
+            }
+
+            $this->pendingCreates[$index] = true;
+
+            $existingLead = Lead::where('created_by', auth()->id())
+                ->where('lead_sheet_id', $this->sheetFilter)
+                ->where('name', $row['name'])
+                ->whereDate('lead_date', now()->toDateString())
+                ->orderBy('created_at', 'desc')
+                ->first();
+
+            if ($existingLead) {
+                $this->leadsData[$index]['id'] = $existingLead->id;
+                $this->pendingCreates[$index] = false;
+                return;
+            }
+
             $lead = Lead::create([
                 'created_by' => auth()->id(),
                 'lead_sheet_id' => $this->sheetFilter,
@@ -121,7 +141,7 @@ new class extends Component
                 'web_link' => $row['web_link'] ?? null,
             ]);
 
-            $salesUsers = User::where('role', 'sales')->get();
+            $salesUsers = User::whereIn('role', ['sales', 'upsale', 'front_sale'])->get();
             foreach ($salesUsers as $user) {
                 \App\Models\Notification::create([
                     'user_id' => $user->id,
@@ -134,6 +154,7 @@ new class extends Component
             $this->leadsData[$index]['id'] = $lead->id;
             $this->dispatch('lead-created');
             $this->ensureEmptyRow();
+            $this->pendingCreates[$index] = false;
             return;
         }
 
@@ -265,7 +286,7 @@ new class extends Component
                 <h1 class="text-3xl font-bold text-gray-900">Leads Management</h1>
                 <p class="text-gray-600 mt-1">Manage and track all your leads</p>
             </div>
-            @if(auth()->user()->isAdmin())
+            @if(auth()->user()->canCreateLeads())
                 <button 
                     wire:click="$dispatch('open-create-modal')"
                     class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg font-semibold shadow-sm hover:shadow-md transition-all flex items-center space-x-2"
@@ -279,15 +300,15 @@ new class extends Component
         </div>
     </div>
 
-    @if(auth()->user()->isScrapper())
-        <div class="mb-6">
-            <h2 class="text-lg font-semibold text-gray-900 mb-3">Create Sheet</h2>
-            <livewire:sheets.create />
-        </div>
-    @endif
+        @if(auth()->user()->canCreateSheets())
+            <div class="mb-6">
+                <h2 class="text-lg font-semibold text-gray-900 mb-3">Create Sheet</h2>
+                <livewire:sheets.create />
+            </div>
+        @endif
 
     <!-- Create Lead Modal -->
-    @if(auth()->user()->isAdmin())
+    @if(auth()->user()->canCreateLeads())
         <livewire:leads.create />
     @endif
 
@@ -318,7 +339,7 @@ new class extends Component
                 <option value="hired someone">Hired Someone</option>
                 <option value="no response">No Response</option>
             </select>
-            @if(auth()->user()->isScrapper() || auth()->user()->isSales() || auth()->user()->isAdmin())
+            @if(auth()->user()->isScrapper() || auth()->user()->isSalesTeam() || auth()->user()->isAdmin())
                 <select 
                     wire:model.live="sheetFilter" 
                     class="px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
@@ -420,7 +441,9 @@ new class extends Component
                                         <div class="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold text-sm mr-3">
                                             {{ strtoupper(substr($lead->name, 0, 1)) }}
                                         </div>
-                                        <div class="text-sm font-semibold text-gray-900">{{ $lead->name }}</div>
+                                        <a href="{{ route('leads.show', $lead->id) }}" class="text-sm font-semibold text-gray-900 hover:text-blue-600 transition-colors">
+                                            {{ $lead->name }}
+                                        </a>
                                     </div>
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap">

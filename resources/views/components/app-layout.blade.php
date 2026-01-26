@@ -58,10 +58,11 @@
                                 <span class="text-sm font-semibold text-gray-900 block">{{ auth()->user()->name }}</span>
                                 <span class="text-xs px-2 py-0.5 rounded-full font-medium
                                     @if(auth()->user()->role === 'admin') bg-purple-100 text-purple-700
-                                    @elseif(auth()->user()->role === 'sales') bg-blue-100 text-blue-700
+                                    @elseif(in_array(auth()->user()->role, ['sales', 'upsale'])) bg-blue-100 text-blue-700
+                                    @elseif(auth()->user()->role === 'front_sale') bg-amber-100 text-amber-700
                                     @else bg-emerald-100 text-emerald-700
                                     @endif">
-                                    {{ ucfirst(auth()->user()->role) }}
+                                    {{ ucwords(str_replace('_', ' ', auth()->user()->role)) }}
                                 </span>
                             </div>
                         </div>

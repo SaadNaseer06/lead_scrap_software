@@ -36,6 +36,22 @@ class UserSeeder extends Seeder
             'role' => 'sales',
         ]);
 
+        // Front Sale User
+        User::create([
+            'name' => 'Front Sale User',
+            'email' => 'frontsale@example.com',
+            'password' => Hash::make('password'),
+            'role' => 'front_sale',
+        ]);
+
+        // Upsale User
+        User::create([
+            'name' => 'Upsale User',
+            'email' => 'upsale@example.com',
+            'password' => Hash::make('password'),
+            'role' => 'upsale',
+        ]);
+
         // Scrapper Users
         User::create([
             'name' => 'Scrapper User 1',

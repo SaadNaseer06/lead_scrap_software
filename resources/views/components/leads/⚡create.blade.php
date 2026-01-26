@@ -50,6 +50,10 @@ new class extends Component
 
     public function save()
     {
+        if (!auth()->user()->canCreateLeads()) {
+            abort(403);
+        }
+
         $rules = $this->rules;
         if (auth()->user()->isScrapper()) {
             $rules['lead_sheet_id'] = 'required|exists:lead_sheets,id';
@@ -73,7 +77,7 @@ new class extends Component
         $lead = Lead::create($leadData);
 
         // Notify all sales users
-        $salesUsers = User::where('role', 'sales')->get();
+        $salesUsers = User::whereIn('role', ['sales', 'upsale', 'front_sale'])->get();
         foreach ($salesUsers as $user) {
             \App\Models\Notification::create([
                 'user_id' => $user->id,
@@ -164,10 +168,13 @@ new class extends Component
                 <!-- Modal Body -->
                 <form wire:submit="save" class="bg-white px-6 py-6">
                     <div class="space-y-5">
-                        @if(auth()->user()->isScrapper())
+                        @if(auth()->user()->canCreateSheets())
                             <div>
                                 <label for="lead_sheet_id" class="block text-sm font-semibold text-gray-700 mb-2">
-                                    Sheet <span class="text-red-500">*</span>
+                                    Sheet
+                                    @if(auth()->user()->isScrapper())
+                                        <span class="text-red-500">*</span>
+                                    @endif
                                 </label>
                                 <select
                                     id="lead_sheet_id"

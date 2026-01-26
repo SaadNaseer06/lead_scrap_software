@@ -5,7 +5,7 @@
             <p class="text-gray-600">Here's what's happening with your leads today</p>
         </div>
 
-        @if(auth()->user()->isScrapper())
+        @if(auth()->user()->canCreateSheets())
             <div class="mb-6">
                 <h2 class="text-lg font-semibold text-gray-900 mb-3">Create Sheet</h2>
                 <livewire:sheets.create />
@@ -14,7 +14,7 @@
 
         <livewire:dashboard.stats />
 
-        @if(auth()->user()->isScrapper())
+        @if(auth()->user()->canCreateSheets())
             @php
                 $sheets = \App\Models\LeadSheet::where('created_by', auth()->id())
                     ->orderBy('updated_at', 'desc')

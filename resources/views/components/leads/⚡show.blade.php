@@ -16,7 +16,7 @@ new class extends Component
         $this->loadLead();
         
         // If lead is not opened and user is sales or admin, mark as opened
-        if (!$this->lead->opened_by && (auth()->user()->isSales() || auth()->user()->isAdmin())) {
+        if (!$this->lead->opened_by && (auth()->user()->isSalesTeam() || auth()->user()->isAdmin())) {
             $this->lead->markAsOpened(auth()->user());
             
             // Notify the creator that lead was opened
@@ -61,7 +61,7 @@ new class extends Component
 
     public function addComment()
     {
-        if (!auth()->user()->isSales()) {
+        if (!auth()->user()->isSalesTeam()) {
             abort(403);
         }
 
@@ -243,7 +243,7 @@ new class extends Component
                     <p class="text-sm text-gray-500 mb-4">No comments yet.</p>
                 @endif
 
-                @if(auth()->user()->isSales())
+                @if(auth()->user()->isSalesTeam())
                     <form wire:submit="addComment" class="space-y-3">
                         <textarea
                             wire:model="commentMessage"
@@ -261,7 +261,7 @@ new class extends Component
                 @endif
             </div>
 
-            @if(auth()->user()->isSales() || auth()->user()->isAdmin())
+            @if(auth()->user()->isSalesTeam() || auth()->user()->isAdmin())
                 <div class="bg-amber-50 p-6 rounded-lg border border-amber-200">
                     <h3 class="text-base font-semibold text-gray-900 mb-4">Update Status</h3>
                     <div class="flex flex-wrap gap-3">

@@ -36,10 +36,11 @@
                             <span class="text-sm text-gray-700">{{ auth()->user()->name }}</span>
                             <span class="px-2 py-1 text-xs font-semibold rounded-full 
                                 @if(auth()->user()->role === 'admin') bg-purple-100 text-purple-800
-                                @elseif(auth()->user()->role === 'sales') bg-blue-100 text-blue-800
+                                @elseif(in_array(auth()->user()->role, ['sales', 'upsale'])) bg-blue-100 text-blue-800
+                                @elseif(auth()->user()->role === 'front_sale') bg-amber-100 text-amber-800
                                 @else bg-green-100 text-green-800
                                 @endif">
-                                {{ ucfirst(auth()->user()->role) }}
+                                {{ ucwords(str_replace('_', ' ', auth()->user()->role)) }}
                             </span>
                         </div>
                         <form method="POST" action="{{ route('logout') }}">

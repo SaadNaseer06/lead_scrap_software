@@ -62,7 +62,31 @@ class User extends Authenticatable
      */
     public function isSales(): bool
     {
-        return $this->role === 'sales';
+        return in_array($this->role, ['sales', 'upsale'], true);
+    }
+
+    /**
+     * Check if user is front sale
+     */
+    public function isFrontSale(): bool
+    {
+        return $this->role === 'front_sale';
+    }
+
+    /**
+     * Check if user is upsale
+     */
+    public function isUpsale(): bool
+    {
+        return $this->role === 'upsale';
+    }
+
+    /**
+     * Check if user is part of sales team (sales, upsale, front sale)
+     */
+    public function isSalesTeam(): bool
+    {
+        return $this->isSales() || $this->isFrontSale();
     }
 
     /**
@@ -71,6 +95,22 @@ class User extends Authenticatable
     public function isScrapper(): bool
     {
         return $this->role === 'scrapper';
+    }
+
+    /**
+     * Check if user can create lead sheets
+     */
+    public function canCreateSheets(): bool
+    {
+        return $this->isScrapper() || $this->isFrontSale();
+    }
+
+    /**
+     * Check if user can create leads
+     */
+    public function canCreateLeads(): bool
+    {
+        return $this->isAdmin() || $this->isFrontSale();
     }
 
     /**
