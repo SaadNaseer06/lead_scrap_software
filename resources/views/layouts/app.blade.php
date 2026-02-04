@@ -23,8 +23,11 @@
                             <a href="{{ route('leads.index') }}" class="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
                                 Leads
                             </a>
+                            <a href="{{ route('sheets.index') }}" class="{{ request()->routeIs('sheets.*') ? 'border-blue-500 text-gray-900' : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700' }} inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
+                                Sheets
+                            </a>
                             @if(auth()->user()->isAdmin())
-                                <a href="{{ route('users.index') }}" class="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
+                                <a href="{{ route('users.index') }}" class="{{ request()->routeIs('users.*') ? 'border-blue-500 text-gray-900' : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700' }} inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
                                     Users
                                 </a>
                             @endif
@@ -36,7 +39,7 @@
                             <span class="text-sm text-gray-700">{{ auth()->user()->name }}</span>
                             <span class="px-2 py-1 text-xs font-semibold rounded-full 
                                 @if(auth()->user()->role === 'admin') bg-purple-100 text-purple-800
-                                @elseif(in_array(auth()->user()->role, ['sales', 'upsale'])) bg-blue-100 text-blue-800
+                                @elseif(auth()->user()->role === 'upsale') bg-blue-100 text-blue-800
                                 @elseif(auth()->user()->role === 'front_sale') bg-amber-100 text-amber-800
                                 @else bg-green-100 text-green-800
                                 @endif">

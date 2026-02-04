@@ -38,8 +38,14 @@
                                 </svg>
                                 Leads
                             </a>
+                            <a href="{{ route('sheets.index') }}" class="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ request()->routeIs('sheets.*') ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-100' }}">
+                                <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                </svg>
+                                Sheets
+                            </a>
                             @if(auth()->user()->isAdmin())
-                                <a href="#" class="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-100 transition-colors">
+                                <a href="{{ route('users.index') }}" class="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium transition-colors {{ request()->routeIs('users.*') ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-100' }}">
                                     <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path>
                                     </svg>
@@ -58,7 +64,7 @@
                                 <span class="text-sm font-semibold text-gray-900 block">{{ auth()->user()->name }}</span>
                                 <span class="text-xs px-2 py-0.5 rounded-full font-medium
                                     @if(auth()->user()->role === 'admin') bg-purple-100 text-purple-700
-                                    @elseif(in_array(auth()->user()->role, ['sales', 'upsale'])) bg-blue-100 text-blue-700
+                                    @elseif(auth()->user()->role === 'upsale') bg-blue-100 text-blue-700
                                     @elseif(auth()->user()->role === 'front_sale') bg-amber-100 text-amber-700
                                     @else bg-emerald-100 text-emerald-700
                                     @endif">
@@ -102,5 +108,6 @@
     </main>
 
     @livewireScripts
+    <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
 </body>
 </html>

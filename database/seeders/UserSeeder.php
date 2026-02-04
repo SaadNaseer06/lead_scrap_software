@@ -21,19 +21,19 @@ class UserSeeder extends Seeder
             'role' => 'admin',
         ]);
 
-        // Sales Users
+        // Front Sale Users
         User::create([
-            'name' => 'Sales User 1',
-            'email' => 'sales1@example.com',
+            'name' => 'Front Sale User 1',
+            'email' => 'frontsale1@example.com',
             'password' => Hash::make('password'),
-            'role' => 'sales',
+            'role' => 'front_sale',
         ]);
 
         User::create([
-            'name' => 'Sales User 2',
-            'email' => 'sales2@example.com',
+            'name' => 'Front Sale User 2',
+            'email' => 'frontsale2@example.com',
             'password' => Hash::make('password'),
-            'role' => 'sales',
+            'role' => 'front_sale',
         ]);
 
         // Front Sale User

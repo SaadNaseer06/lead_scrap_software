@@ -2,6 +2,7 @@
 
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Auth\LoginController;
+use App\Http\Controllers\UserController;
 
 // Authentication Routes
 Route::get('/login', [LoginController::class, 'showLoginForm'])->name('login');
@@ -32,4 +33,16 @@ Route::middleware('auth')->group(function () {
     Route::get('/leads/{id}', function ($id) {
         return view('leads.show', ['id' => $id]);
     })->name('leads.show');
+    
+    // Sheets Routes
+    Route::get('/sheets', function () {
+        return view('sheets.index');
+    })->name('sheets.index');
+    
+    // Users Routes (Admin Only) - Real-time with Livewire
+    Route::middleware('role:admin')->group(function () {
+        Route::get('/users', function () {
+            return view('users.index');
+        })->name('users.index');
+    });
 });

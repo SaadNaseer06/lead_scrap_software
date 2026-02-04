@@ -4,10 +4,10 @@ Lead management app with scrapper sheets, Excel-style data entry, and sales work
 
 ## Features
 
-- Role-based access: admin, sales, scrapper.
+- Role-based access: admin, front_sale, upsale, scrapper.
 - Scrapper sheets with inline grid editing (auto-save).
 - Sales notifications for new leads.
-- Lead comments (sales-only).
+- Lead comments (sales team only).
 - Custom lead statuses:
   - Wrong Number
   - Follow Up
@@ -55,8 +55,8 @@ npm run dev
 ## Usage Notes
 
 - Scrapper creates a sheet and adds leads in the sheet grid.
-- Sales/admin view leads and update statuses.
-- Sales can add comments in the lead detail view.
+- Sales team (front_sale, upsale) and admin view leads and update statuses.
+- Sales team can add comments in the lead detail view.
 
 ## Status Migration
 

@@ -58,11 +58,11 @@ class User extends Authenticatable
     }
 
     /**
-     * Check if user is sales
+     * Check if user is sales (upsale only)
      */
     public function isSales(): bool
     {
-        return in_array($this->role, ['sales', 'upsale'], true);
+        return $this->role === 'upsale';
     }
 
     /**
@@ -82,11 +82,11 @@ class User extends Authenticatable
     }
 
     /**
-     * Check if user is part of sales team (sales, upsale, front sale)
+     * Check if user is part of sales team (upsale, front sale)
      */
     public function isSalesTeam(): bool
     {
-        return $this->isSales() || $this->isFrontSale();
+        return $this->isUpsale() || $this->isFrontSale();
     }
 
     /**

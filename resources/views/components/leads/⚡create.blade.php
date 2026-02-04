@@ -151,7 +151,7 @@ new class extends Component
                 $lead = Lead::create($leadData);
 
                 // Notify all sales users efficiently
-                $salesUsers = User::whereIn('role', ['sales', 'upsale', 'front_sale'])->get();
+                $salesUsers = User::whereIn('role', ['upsale', 'front_sale'])->get();
                 
                 if ($salesUsers->isNotEmpty()) {
                     $notifications = $salesUsers->map(function ($user) use ($lead) {
