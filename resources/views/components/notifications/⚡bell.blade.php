@@ -18,6 +18,7 @@ new class extends Component
     #[On('lead-created')]
     #[On('lead-opened')]
     #[On('lead-updated')]
+    #[On('notification-created')]
     public function refreshNotifications()
     {
         $this->loadNotifications();
@@ -32,12 +33,25 @@ new class extends Component
                 return;
             }
 
-            $this->unreadCount = Notification::where('user_id', auth()->id())
-                ->where('read', false)
-                ->count();
+            $query = Notification::where('user_id', auth()->id());
+
+            // Apply team-based filtering for sales users
+            if (auth()->user()->isSalesTeam()) {
+                $userTeamIds = auth()->user()->teams()->pluck('teams.id')->toArray();
+                if (!empty($userTeamIds)) {
+                    $query->whereHas('lead.leadSheet', function ($q) use ($userTeamIds) {
+                        $q->whereHas('teams', fn ($t) => $t->whereIn('teams.id', $userTeamIds));
+                    });
+                } else {
+                    $query->whereRaw('1 = 0'); // no teams = no notifications
+                }
+            }
+            // Admin and Scrapper: no extra filter (see all their notifications)
+
+            $this->unreadCount = (clone $query)->where('read', false)->count();
             
-            $this->notifications = Notification::where('user_id', auth()->id())
-                ->with('lead')
+            $this->notifications = $query
+                ->with('lead.leadSheet')
                 ->orderBy('created_at', 'desc')
                 ->limit(10)
                 ->get()
@@ -61,8 +75,20 @@ new class extends Component
                 return;
             }
 
-            $notification = Notification::find($notificationId);
+            $notification = Notification::with('lead.leadSheet')->find($notificationId);
             if ($notification && $notification->user_id === auth()->id()) {
+                // For sales users, verify the notification's lead belongs to their team's sheet
+                if (auth()->user()->isSalesTeam()) {
+                    $userTeamIds = auth()->user()->teams()->pluck('teams.id')->toArray();
+                    if (!empty($userTeamIds) && $notification->lead && $notification->lead->leadSheet) {
+                        $sheetTeamIds = $notification->lead->leadSheet->teams()->pluck('teams.id')->toArray();
+                        if (empty(array_intersect($userTeamIds, $sheetTeamIds))) {
+                            return; // Not authorized to mark this notification
+                        }
+                    } else {
+                        return; // No teams or no lead/sheet
+                    }
+                }
                 $notification->markAsRead();
                 $this->loadNotifications();
             }
@@ -78,9 +104,21 @@ new class extends Component
                 return;
             }
 
-            Notification::where('user_id', auth()->id())
-                ->where('read', false)
-                ->update(['read' => true]);
+            $query = Notification::where('user_id', auth()->id());
+
+            // Apply team-based filtering for sales users when marking all as read
+            if (auth()->user()->isSalesTeam()) {
+                $userTeamIds = auth()->user()->teams()->pluck('teams.id')->toArray();
+                if (!empty($userTeamIds)) {
+                    $query->whereHas('lead.leadSheet', function ($q) use ($userTeamIds) {
+                        $q->whereHas('teams', fn ($t) => $t->whereIn('teams.id', $userTeamIds));
+                    });
+                } else {
+                    $query->whereRaw('1 = 0'); // no teams = no notifications
+                }
+            }
+
+            $query->where('read', false)->update(['read' => true]);
             $this->loadNotifications();
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::error('Error marking all notifications as read: ' . $e->getMessage());
@@ -91,7 +129,7 @@ new class extends Component
 };
 ?>
 
-<div class="relative" x-data="{ open: false }" wire:poll.5s="loadNotifications">
+<div class="relative" x-data="{ open: false }" wire:poll.3s="$refresh">
     <button 
         @click="open = !open"
         type="button"
@@ -102,7 +140,7 @@ new class extends Component
         </svg>
         @if($unreadCount > 0)
             <span class="absolute top-1 right-1 block h-2.5 w-2.5 rounded-full bg-gradient-to-r from-red-500 to-pink-500 ring-2 ring-white shadow-lg"></span>
-            <span class="absolute -top-1 -right-1 flex h-6 w-6 items-center justify-center rounded-full bg-gradient-to-r from-red-500 to-pink-500 text-xs text-white font-bold shadow-lg" wire:key="unread-count-{{ $unreadCount }}">
+            <span class="absolute -top-1 -right-1 flex h-6 w-6 items-center justify-center rounded-full bg-gradient-to-r from-red-500 to-pink-500 text-xs text-white font-bold shadow-lg" wire:key="unread-count-{{ $unreadCount }}-{{ now()->timestamp }}">
                 {{ $unreadCount > 9 ? '9+' : $unreadCount }}
             </span>
         @endif

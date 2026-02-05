@@ -34,6 +34,8 @@ new class extends Component
                             'type' => 'lead_opened',
                             'message' => "Lead '{$this->lead->name}' has been opened by " . auth()->user()->name,
                         ]);
+                        // Dispatch event to refresh notification bells
+                        $this->dispatch('notification-created');
                     }
                     
                     // Dispatch events to refresh leads list and notifications

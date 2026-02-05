@@ -29,14 +29,25 @@ new class extends Component
                 return;
             }
 
-            $query = Lead::with(['creator', 'opener'])
+            $query = Lead::with(['creator', 'opener', 'leadSheet'])
                 ->orderBy('created_at', 'desc')
                 ->limit(5);
 
             // Apply role-based filtering
             if (auth()->user()->isScrapper()) {
                 $query->where('created_by', auth()->id());
+            } elseif (auth()->user()->isSalesTeam()) {
+                // Sales: only leads from sheets assigned to one of their teams
+                $userTeamIds = auth()->user()->teams()->pluck('teams.id')->toArray();
+                if (!empty($userTeamIds)) {
+                    $query->whereHas('leadSheet', function ($q) use ($userTeamIds) {
+                        $q->whereHas('teams', fn ($t) => $t->whereIn('teams.id', $userTeamIds));
+                    });
+                } else {
+                    $query->whereRaw('1 = 0'); // no teams = no leads
+                }
             }
+            // Admin: no extra filter (sees all)
 
             $this->recentLeads = $query->get();
         } catch (\Exception $e) {

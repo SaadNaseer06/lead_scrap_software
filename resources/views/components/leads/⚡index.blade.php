@@ -213,6 +213,8 @@ new class extends Component
                         })->toArray();
 
                         \App\Models\Notification::insert($notifications);
+                        // Dispatch event to refresh notification bells for all users
+                        $this->dispatch('notification-created');
                     }
 
                     // Update local data with the new lead ID

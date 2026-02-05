@@ -35,9 +35,21 @@ new class extends Component
 
             $baseQuery = Lead::query();
             
+            // Apply role-based filtering
             if (auth()->user()->isScrapper()) {
                 $baseQuery->where('created_by', auth()->id());
+            } elseif (auth()->user()->isSalesTeam()) {
+                // Sales: only leads from sheets assigned to one of their teams
+                $userTeamIds = auth()->user()->teams()->pluck('teams.id')->toArray();
+                if (!empty($userTeamIds)) {
+                    $baseQuery->whereHas('leadSheet', function ($q) use ($userTeamIds) {
+                        $q->whereHas('teams', fn ($t) => $t->whereIn('teams.id', $userTeamIds));
+                    });
+                } else {
+                    $baseQuery->whereRaw('1 = 0'); // no teams = no leads
+                }
             }
+            // Admin: no extra filter (sees all)
 
             // Optimize: Use single query with conditional aggregation
             $stats = $baseQuery->selectRaw('
