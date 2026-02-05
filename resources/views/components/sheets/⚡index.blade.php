@@ -34,7 +34,7 @@ new class extends Component
 
     public function render()
     {
-        $query = LeadSheet::with(['creator', 'leads']);
+        $query = LeadSheet::with(['creator', 'leads', 'teams']);
 
         // Apply search filter
         if ($this->search) {
@@ -42,11 +42,23 @@ new class extends Component
         }
 
         // Role-based filtering
-        if (auth()->check() && auth()->user()->isScrapper()) {
-            // Scrappers only see their own sheets
-            $query->where('created_by', auth()->id());
+        if (auth()->check()) {
+            if (auth()->user()->isAdmin()) {
+                // Admin sees all sheets
+            } elseif (auth()->user()->isScrapper()) {
+                // Scrappers only see their own sheets
+                $query->where('created_by', auth()->id());
+            } else {
+                // Sales (front_sale, upsale): see sheets assigned to a team they belong to
+                $userTeamIds = auth()->user()->teams()->pluck('teams.id')->toArray();
+                if (!empty($userTeamIds)) {
+                    $query->whereHas('teams', fn ($q) => $q->whereIn('teams.id', $userTeamIds));
+                } else {
+                    // User has no teams: show nothing (or no sheets)
+                    $query->whereRaw('1 = 0');
+                }
+            }
         }
-        // Sales and other roles see all sheets
 
         $sheets = $query->orderBy('updated_at', 'desc')->paginate(15);
 

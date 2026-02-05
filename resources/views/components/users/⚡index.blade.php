@@ -4,6 +4,7 @@ use App\Models\User;
 use Livewire\Component;
 use Livewire\WithPagination;
 use Livewire\Attributes\On;
+use Illuminate\Support\Facades\DB;
 
 new class extends Component
 {
@@ -120,7 +121,16 @@ new class extends Component
 
         $users = $query->orderBy('created_at', 'desc')->paginate(15);
 
-        return view('components.users.⚡index', compact('users'));
+        // Users with session activity in the last 2 minutes are considered online (reduces “online” from background tabs)
+        $onlineUserIds = DB::table('sessions')
+            ->whereNotNull('user_id')
+            ->where('last_activity', '>', now()->subMinutes(2)->timestamp)
+            ->pluck('user_id')
+            ->unique()
+            ->values()
+            ->toArray();
+
+        return view('components.users.⚡index', compact('users', 'onlineUserIds'));
     }
 };
 ?>
@@ -148,16 +158,18 @@ new class extends Component
 
         <!-- Search Bar -->
         <div class="px-6 py-4 bg-gray-50 border-b border-gray-200">
-            <div class="relative">
+            <div class="flex items-center border border-gray-300 rounded-lg bg-white focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-blue-500">
+                <span class="pl-3 flex items-center justify-center shrink-0 text-gray-400" aria-hidden="true">
+                    <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                    </svg>
+                </span>
                 <input
                     type="text"
                     wire:model.live.debounce.300ms="search"
                     placeholder="Search users by name or email..."
-                    class="w-full px-4 py-2 pl-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    class="flex-1 min-w-0 py-2 pr-4 pl-1 border-0 bg-transparent focus:ring-0 focus:outline-none"
                 >
-                <svg class="absolute left-3 top-2.5 h-5 w-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
-                </svg>
             </div>
         </div>
 
@@ -174,6 +186,9 @@ new class extends Component
                         </th>
                         <th scope="col" class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
                             Role
+                        </th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                            Status
                         </th>
                         <th scope="col" class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
                             Created At
@@ -212,6 +227,21 @@ new class extends Component
                                     {{ ucwords(str_replace('_', ' ', $user->role)) }}
                                 </span>
                             </td>
+                            <td class="px-6 py-4 whitespace-nowrap align-middle">
+                                <div class="flex items-center">
+                                    @if(in_array($user->id, $onlineUserIds ?? []))
+                                        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700 min-w-[4.5rem] justify-center">
+                                            <span class="w-2 h-2 shrink-0 rounded-full bg-emerald-500 animate-pulse"></span>
+                                            <span>Online</span>
+                                        </span>
+                                    @else
+                                        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600 min-w-[4.5rem] justify-center">
+                                            <span class="w-2 h-2 shrink-0 rounded-full bg-gray-400"></span>
+                                            <span>Offline</span>
+                                        </span>
+                                    @endif
+                                </div>
+                            </td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                                 {{ $user->created_at->format('M d, Y') }}
                             </td>
@@ -241,7 +271,7 @@ new class extends Component
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="5" class="px-6 py-12 text-center">
+                            <td colspan="6" class="px-6 py-12 text-center">
                                 <div class="text-gray-500">
                                     <svg class="mx-auto h-12 w-12 text-gray-400 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path>

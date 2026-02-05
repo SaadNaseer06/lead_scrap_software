@@ -144,4 +144,12 @@ class User extends Authenticatable
     {
         return $this->hasMany(LeadComment::class);
     }
+
+    /**
+     * Get teams this user belongs to
+     */
+    public function teams()
+    {
+        return $this->belongsToMany(\App\Models\Team::class, 'team_user');
+    }
 }

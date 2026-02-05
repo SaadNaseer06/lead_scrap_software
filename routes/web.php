@@ -44,5 +44,8 @@ Route::middleware('auth')->group(function () {
         Route::get('/users', function () {
             return view('users.index');
         })->name('users.index');
+        Route::get('/teams', function () {
+            return view('teams.index');
+        })->name('teams.index');
     });
 });

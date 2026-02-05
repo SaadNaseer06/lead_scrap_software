@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\LeadSheet;
+use App\Models\Team;
 use Livewire\Component;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
@@ -9,6 +10,7 @@ use Illuminate\Validation\ValidationException;
 new class extends Component
 {
     public $name = '';
+    public $teamIds = [];
 
     public function save()
     {
@@ -37,16 +39,20 @@ new class extends Component
             }
 
             // Validate the input - check for global uniqueness (matching database constraint)
-            $this->validate([
+            $rules = [
                 'name' => [
                     'required',
                     'string',
                     'max:255',
                     \Illuminate\Validation\Rule::unique('lead_sheets', 'name')
                 ],
-            ], [
+                'teamIds' => Team::exists() ? ['array', 'min:1'] : ['array'],
+                'teamIds.*' => 'exists:teams,id',
+            ];
+            $this->validate($rules, [
                 'name.required' => 'Sheet name is required.',
                 'name.unique' => 'A sheet with this name already exists. Please choose a different name.',
+                'teamIds.min' => 'Select at least one team so sales users can see this sheet.',
             ]);
 
             // Use transaction for safety
@@ -63,6 +69,8 @@ new class extends Component
                     throw new \Exception('Failed to create sheet in database - no ID returned.');
                 }
 
+                $sheet->teams()->sync(array_map('intval', $this->teamIds ?? []));
+
                 DB::commit();
 
                 Log::info('Sheet created successfully', [
@@ -72,7 +80,7 @@ new class extends Component
                 ]);
 
                 // Reset form
-                $this->reset('name');
+                $this->reset('name', 'teamIds');
                 $this->resetErrorBag();
 
                 // Dispatch events to refresh other components
@@ -126,42 +134,73 @@ new class extends Component
             $this->addError('name', 'An error occurred while creating the sheet.');
         }
     }
+
+    public function render()
+    {
+        $teams = Team::orderBy('name')->get(['id', 'name']);
+        return view('components.sheets.⚡create', ['teams' => $teams]);
+    }
 };
 ?>
 
 <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-    <form wire:submit="save" class="flex flex-col sm:flex-row gap-3 items-start sm:items-end">
-        <div class="flex-1 w-full">
-            <label for="sheet_name" class="block text-sm font-semibold text-gray-700 mb-2">
-                Sheet Name <span class="text-red-500">*</span>
-            </label>
-            <input
-                type="text"
-                id="sheet_name"
-                wire:model.defer="name"
-                class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 @error('name') border-red-500 @enderror"
-                placeholder="e.g. March 2026 Leads"
-                autocomplete="off"
-                required
-            >
-            @error('name') 
-                <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> 
-            @enderror
+    @if($teams->isEmpty())
+        <div class="px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800">
+            <p class="font-medium">Cannot create a sheet yet</p>
+            <p class="text-sm mt-1">No teams exist. Ask your admin to create teams and add sales users first. Sheets must be assigned to a team so only that team's members see the leads.</p>
+            <a href="{{ route('teams.index') }}" class="inline-block mt-3 text-sm font-medium text-amber-700 underline hover:text-amber-900">Go to Teams (admin only)</a>
         </div>
-        <button
-            type="submit"
-            wire:loading.attr="disabled"
-            wire:target="save"
-            class="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center space-x-2 min-w-[120px]"
-        >
-            <span wire:loading.remove wire:target="save">Create Sheet</span>
-            <span wire:loading wire:target="save" class="flex items-center space-x-2">
-                <svg class="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                <span>Creating...</span>
-            </span>
-        </button>
-    </form>
+    @else
+        <form wire:submit="save" class="space-y-4">
+            <div>
+                <label for="sheet_name" class="block text-sm font-semibold text-gray-700 mb-2">
+                    Sheet Name <span class="text-red-500">*</span>
+                </label>
+                <input
+                    type="text"
+                    id="sheet_name"
+                    wire:model.defer="name"
+                    class="w-full max-w-md px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 @error('name') border-red-500 @enderror"
+                    placeholder="e.g. March 2026 Leads"
+                    autocomplete="off"
+                    required
+                >
+                @error('name') 
+                    <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> 
+                @enderror
+            </div>
+            <div>
+                <label class="block text-sm font-semibold text-gray-700 mb-2">
+                    Assign to Team(s) <span class="text-red-500">*</span>
+                </label>
+                <p class="text-xs text-gray-600 mb-2">Select at least one team. Only members of selected teams will see this sheet and its leads.</p>
+                <div class="flex flex-wrap gap-3 p-3 border border-gray-300 rounded-lg bg-gray-50 max-h-36 overflow-y-auto @error('teamIds') border-red-500 @enderror">
+                    @foreach($teams as $team)
+                        <label class="inline-flex items-center gap-2 cursor-pointer px-2 py-1 rounded hover:bg-gray-100">
+                            <input type="checkbox" wire:model.defer="teamIds" value="{{ $team->id }}" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                            <span class="text-sm text-gray-800">{{ $team->name }}</span>
+                        </label>
+                    @endforeach
+                </div>
+                @error('teamIds') 
+                    <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> 
+                @enderror
+            </div>
+            <button
+                type="submit"
+                wire:loading.attr="disabled"
+                wire:target="save"
+                class="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center space-x-2 min-w-[120px]"
+            >
+                <span wire:loading.remove wire:target="save">Create Sheet</span>
+                <span wire:loading wire:target="save" class="flex items-center space-x-2">
+                    <svg class="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span>Creating...</span>
+                </span>
+            </button>
+        </form>
+    @endif
 </div>

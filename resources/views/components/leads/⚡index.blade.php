@@ -18,6 +18,7 @@ new class extends Component
     public $viewMode = 'table'; 
     public $leadsData = [];
     public $pendingCreates = [];
+    public $lastLoadedSheetId = null; // Track which sheet's leads are currently loaded
     protected $queryString = [
         'sheetFilter' => ['except' => ''],
         'viewMode' => ['except' => 'table'],
@@ -40,6 +41,7 @@ new class extends Component
 
     public function updatedSheetFilter()
     {
+        $this->lastLoadedSheetId = null; // Force reload when sheet changes
         $this->loadSheetLeads();
     }
 
@@ -267,32 +269,51 @@ new class extends Component
     public function loadSheetLeads()
     {
         try {
-            // Validate user and role
-            if (!auth()->check() || !auth()->user()->isScrapper()) {
+            // Validate user and role (table view is scrapper-only; list view can be sales/admin)
+            if (!auth()->check()) {
                 $this->leadsData = [$this->emptyRow()];
+                $this->lastLoadedSheetId = null;
+                return;
+            }
+            // For table view we need scrapper; list view doesn't use leadsData
+            if (auth()->user()->isScrapper() === false) {
+                $this->leadsData = [$this->emptyRow()];
+                $this->lastLoadedSheetId = null;
                 return;
             }
 
-            // Validate sheet filter
-            if (!$this->sheetFilter || !is_numeric($this->sheetFilter)) {
+            // Validate sheet filter (cast to int for consistent querying)
+            $sheetId = is_numeric($this->sheetFilter) ? (int) $this->sheetFilter : null;
+            if (!$sheetId) {
                 $this->leadsData = [$this->emptyRow()];
+                $this->lastLoadedSheetId = null;
                 return;
             }
 
-            // Verify sheet exists and belongs to user
-            $sheet = LeadSheet::where('id', $this->sheetFilter)
-                ->where('created_by', auth()->id())
-                ->first();
+            // Verify sheet exists and belongs to user (scrappers) or allow any sheet for sales/admin viewing
+            $sheet = LeadSheet::where('id', $sheetId)->first();
 
             if (!$sheet) {
                 $this->leadsData = [$this->emptyRow()];
-                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Selected sheet not found or access denied.']);
+                $this->lastLoadedSheetId = null;
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Selected sheet not found.']);
+                return;
+            }
+
+            // Scrappers can only load leads from their own sheets
+            if (auth()->user()->isScrapper() && $sheet->created_by !== auth()->id()) {
+                $this->leadsData = [$this->emptyRow()];
+                $this->lastLoadedSheetId = null;
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Access denied to this sheet.']);
                 return;
             }
 
             // Load leads for this sheet
-            $leads = Lead::where('created_by', auth()->id())
-                ->where('lead_sheet_id', $this->sheetFilter)
+            // Scrappers see only their own leads in their own sheets
+            $leadsQuery = Lead::where('created_by', auth()->id())
+                ->where('lead_sheet_id', $sheetId);
+            
+            $leads = $leadsQuery
                 ->get()
                 ->map(function ($lead) {
                     return [
@@ -312,7 +333,18 @@ new class extends Component
                 ->values()
                 ->all();
 
+            // Log for debugging
+            \Illuminate\Support\Facades\Log::info('Loaded sheet leads for scrapper', [
+                'user_id' => auth()->id(),
+                'user_name' => auth()->user()->name,
+                'sheet_id' => $sheetId,
+                'sheet_name' => $sheet->name ?? 'Unknown',
+                'leads_count' => count($leads),
+                'query_result' => $leadsQuery->toSql(),
+            ]);
+
             $this->leadsData = $leads;
+            $this->lastLoadedSheetId = (string) $sheetId;
             $this->pendingCreates = []; // Clear pending creates when reloading
             $this->ensureEmptyRow();
         } catch (\Exception $e) {
@@ -321,6 +353,7 @@ new class extends Component
                 'sheet_id' => $this->sheetFilter,
             ]);
             $this->leadsData = [$this->emptyRow()];
+            $this->lastLoadedSheetId = null;
             $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to load leads. Please try again.']);
         }
     }
@@ -425,13 +458,16 @@ new class extends Component
 
     public function mount()
     {
-        // Set view mode from query parameter
+        // Sync from query string so initial load has correct sheet when URL has ?sheetFilter=
+        if (request()->has('sheetFilter') && request()->get('sheetFilter') !== '') {
+            $this->sheetFilter = request()->get('sheetFilter');
+        }
         if (request()->has('viewMode') && in_array(request()->get('viewMode'), ['table', 'list'])) {
             $this->viewMode = request()->get('viewMode');
         }
         
-        // Load sheet leads only for table view
-        if (auth()->check() && auth()->user()->isScrapper() && $this->viewMode === 'table' && empty($this->leadsData)) {
+        // Load sheet leads for table view when we have a sheet selected
+        if (auth()->check() && auth()->user()->isScrapper() && $this->viewMode === 'table' && $this->sheetFilter) {
             $this->loadSheetLeads();
         }
     }
@@ -439,17 +475,69 @@ new class extends Component
     public function render()
     {
         try {
-            // Load sheet leads data only for table view
-            if (auth()->check() && auth()->user()->isScrapper() && $this->viewMode === 'table' && empty($this->leadsData)) {
-                $this->loadSheetLeads();
+            // For scrapper in table view: ensure sheet leads are loaded when sheet is selected
+            if (auth()->check() 
+                && auth()->user()->isScrapper() 
+                && $this->viewMode === 'table' 
+                && $this->sheetFilter) {
+                
+                $currentSheetId = is_numeric($this->sheetFilter) ? (string) ((int) $this->sheetFilter) : null;
+                
+                // Determine if we need to load
+                $needsLoad = false;
+                
+                // Case 1: Never loaded before
+                if ($this->lastLoadedSheetId === null) {
+                    $needsLoad = true;
+                }
+                // Case 2: Sheet changed
+                elseif ($currentSheetId && $this->lastLoadedSheetId !== $currentSheetId) {
+                    $needsLoad = true;
+                }
+                // Case 3: Only have empty placeholder row (no real leads loaded)
+                elseif (empty($this->leadsData) || (count($this->leadsData) === 1 && empty($this->leadsData[0]['id'] ?? null))) {
+                    // Check if the single row is truly empty (all fields empty)
+                    if (count($this->leadsData) === 1) {
+                        $row = $this->leadsData[0];
+                        $allEmpty = true;
+                        foreach ($row as $key => $val) {
+                            if ($key !== 'id' && $val !== null && $val !== '') {
+                                $allEmpty = false;
+                                break;
+                            }
+                        }
+                        if ($allEmpty) {
+                            $needsLoad = true;
+                        }
+                    } else {
+                        $needsLoad = true;
+                    }
+                }
+                
+                if ($needsLoad) {
+                    $this->loadSheetLeads();
+                }
             }
 
-            $query = Lead::with(['creator', 'opener'])
+            $query = Lead::with(['creator', 'opener', 'leadSheet'])
                 ->orderBy('created_at', 'desc');
 
             // Apply role-based filtering
-            if (auth()->check() && auth()->user()->isScrapper()) {
-                $query->where('created_by', auth()->id());
+            if (auth()->check()) {
+                if (auth()->user()->isScrapper()) {
+                    $query->where('created_by', auth()->id());
+                } elseif (auth()->user()->isSalesTeam()) {
+                    // Sales: only leads from sheets assigned to one of their teams
+                    $userTeamIds = auth()->user()->teams()->pluck('teams.id')->toArray();
+                    if (!empty($userTeamIds)) {
+                        $query->whereHas('leadSheet', function ($q) use ($userTeamIds) {
+                            $q->whereHas('teams', fn ($t) => $t->whereIn('teams.id', $userTeamIds));
+                        });
+                    } else {
+                        $query->whereRaw('1 = 0'); // no teams = no leads
+                    }
+                }
+                // Admin: no extra filter (sees all)
             }
 
             // Apply search filter
@@ -485,9 +573,18 @@ new class extends Component
 
             $leads = $query->paginate(10);
 
-            $sheetsQuery = LeadSheet::orderBy('created_at', 'desc');
-            if (auth()->check() && auth()->user()->isScrapper()) {
-                $sheetsQuery->where('created_by', auth()->id());
+            $sheetsQuery = LeadSheet::with('teams')->orderBy('created_at', 'desc');
+            if (auth()->check()) {
+                if (auth()->user()->isScrapper()) {
+                    $sheetsQuery->where('created_by', auth()->id());
+                } elseif (auth()->user()->isSalesTeam()) {
+                    $userTeamIds = auth()->user()->teams()->pluck('teams.id')->toArray();
+                    if (!empty($userTeamIds)) {
+                        $sheetsQuery->whereHas('teams', fn ($q) => $q->whereIn('teams.id', $userTeamIds));
+                    } else {
+                        $sheetsQuery->whereRaw('1 = 0');
+                    }
+                }
             }
 
             return view('components.leads.⚡index', [
@@ -537,6 +634,12 @@ new class extends Component
     <!-- Create Lead Modal -->
     @if(auth()->user()->canCreateLeads())
         <livewire:leads.create />
+    @endif
+
+    @if(auth()->user()->isSalesTeam())
+        <div class="mb-4 px-4 py-2 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
+            <strong>Your view:</strong> You only see leads from sheets that are assigned to your team(s). If you don’t see a sheet or any leads, ask your admin to add you to a team and assign that sheet to the team.
+        </div>
     @endif
 
     <!-- Search and Filter -->
