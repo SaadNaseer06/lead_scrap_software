@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\Lead;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\UserController;
@@ -24,13 +25,17 @@ Route::middleware('auth')->group(function () {
         return view('leads.index');
     })->name('leads.index');
     
-    Route::middleware('role:admin,scrapper')->group(function () {
+    Route::middleware('role:admin,scrapper,front_sale')->group(function () {
         Route::get('/leads/create', function () {
             return view('leads.create');
         })->name('leads.create');
     });
     
-    Route::get('/leads/{id}', function ($id) {
+    Route::match(['get', 'post'], '/leads/{id}', function ($id) {
+        // If lead was removed from DB (e.g. creator cleared name), never show 404 – redirect with message
+        if (!Lead::where('id', $id)->exists()) {
+            return redirect()->route('dashboard')->with('message', 'Lead removed.');
+        }
         return view('leads.show', ['id' => $id]);
     })->name('leads.show');
     

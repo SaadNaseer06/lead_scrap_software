@@ -48,14 +48,21 @@ new class extends Component
             }
             // Admin and Scrapper: no extra filter (see all their notifications)
 
+            // Count unread (use same filter as list; match DB 0/1 and boolean)
             $this->unreadCount = (clone $query)->where('read', false)->count();
-            
-            $this->notifications = $query
+
+            $collection = $query
                 ->with('lead.leadSheet')
                 ->orderBy('created_at', 'desc')
                 ->limit(10)
-                ->get()
-                ->toArray();
+                ->get();
+
+            // Normalize to array with explicit boolean 'read' so the view always gets true/false
+            $this->notifications = $collection->map(function ($n) {
+                $arr = $n->toArray();
+                $arr['read'] = (bool) ($arr['read'] ?? false);
+                return $arr;
+            })->all();
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::error('Error loading notifications: ' . $e->getMessage());
             $this->unreadCount = 0;
@@ -91,6 +98,7 @@ new class extends Component
                 }
                 $notification->markAsRead();
                 $this->loadNotifications();
+                $this->dispatch('$refresh');
             }
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::error('Error marking notification as read: ' . $e->getMessage());
@@ -104,22 +112,13 @@ new class extends Component
                 return;
             }
 
-            $query = Notification::where('user_id', auth()->id());
+            // Mark all unread notifications for this user (simple bulk update, no filter)
+            Notification::where('user_id', auth()->id())
+                ->where('read', false)
+                ->update(['read' => true]);
 
-            // Apply team-based filtering for sales users when marking all as read
-            if (auth()->user()->isSalesTeam()) {
-                $userTeamIds = auth()->user()->teams()->pluck('teams.id')->toArray();
-                if (!empty($userTeamIds)) {
-                    $query->whereHas('lead.leadSheet', function ($q) use ($userTeamIds) {
-                        $q->whereHas('teams', fn ($t) => $t->whereIn('teams.id', $userTeamIds));
-                    });
-                } else {
-                    $query->whereRaw('1 = 0'); // no teams = no notifications
-                }
-            }
-
-            $query->where('read', false)->update(['read' => true]);
             $this->loadNotifications();
+            $this->dispatch('$refresh');
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::error('Error marking all notifications as read: ' . $e->getMessage());
         }
@@ -168,19 +167,25 @@ new class extends Component
             </h3>
             @if($unreadCount > 0)
                 <button 
+                    type="button"
+                    @click.stop
                     wire:click="markAllAsRead"
-                    class="text-sm text-white/90 hover:text-white font-semibold px-3 py-1 bg-white/20 rounded-lg hover:bg-white/30 transition-all"
+                    wire:loading.attr="disabled"
+                    class="text-sm text-white/90 hover:text-white font-semibold px-3 py-1 bg-white/20 rounded-lg hover:bg-white/30 transition-all disabled:opacity-70"
                 >
-                    Mark all read
+                    <span wire:loading.remove wire:target="markAllAsRead">Mark all read</span>
+                    <span wire:loading wire:target="markAllAsRead">Updating...</span>
                 </button>
             @endif
         </div>
         
-        <div class="overflow-y-auto flex-1">
+        <div class="overflow-y-auto flex-1" wire:key="notification-list-{{ $unreadCount }}">
             @forelse($notifications as $notification)
+                @php $isUnread = !($notification['read'] ?? false); @endphp
                 <div 
+                    wire:key="notification-{{ $notification['id'] }}-{{ $isUnread ? 'unread' : 'read' }}"
                     wire:click="markAsRead({{ $notification['id'] }})"
-                    class="p-4 border-b border-gray-100 hover:bg-gradient-to-r hover:from-blue-50 hover:to-indigo-50 cursor-pointer transition-all duration-200 {{ !$notification['read'] ? 'bg-gradient-to-r from-blue-50 to-indigo-50 border-l-4 border-blue-500' : '' }}"
+                    class="p-4 border-b border-gray-100 hover:bg-gradient-to-r hover:from-blue-50 hover:to-indigo-50 cursor-pointer transition-all duration-200 {{ $isUnread ? 'bg-gradient-to-r from-blue-50 to-indigo-50 border-l-4 border-blue-500' : '' }}"
                 >
                     <div class="flex items-start">
                         <div class="flex-1">
@@ -198,7 +203,7 @@ new class extends Component
                                 </a>
                             @endif
                         </div>
-                        @if(!$notification['read'])
+                        @if($isUnread)
                             <span class="ml-2 h-2 w-2 bg-blue-500 rounded-full"></span>
                         @endif
                     </div>

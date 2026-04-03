@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\Lead;
+use App\Models\LeadGroup;
 use App\Models\LeadSheet;
 use App\Models\User;
 use Livewire\Component;
@@ -15,12 +16,14 @@ new class extends Component
     public $search = '';
     public $statusFilter = '';
     public $sheetFilter = '';
+    public $groupFilter = '';
+    public $newGroupName = '';
     public $viewMode = 'table'; 
     public $leadsData = [];
     public $pendingCreates = [];
-    public $lastLoadedSheetId = null; // Track which sheet's leads are currently loaded
     protected $queryString = [
         'sheetFilter' => ['except' => ''],
+        'groupFilter' => ['except' => ''],
         'viewMode' => ['except' => 'table'],
     ];
 
@@ -41,8 +44,51 @@ new class extends Component
 
     public function updatedSheetFilter()
     {
-        $this->lastLoadedSheetId = null; // Force reload when sheet changes
+        $this->groupFilter = '';
         $this->loadSheetLeads();
+    }
+
+    public function updatedGroupFilter()
+    {
+        $this->loadSheetLeads();
+    }
+
+    public function addGroup()
+    {
+        $this->validate(['newGroupName' => 'required|string|max:255'], ['newGroupName.required' => 'Table name is required.']);
+        $sheetId = (int) $this->sheetFilter;
+        $sheet = LeadSheet::where('id', $sheetId)->where('created_by', auth()->id())->first();
+        if (!$sheet) {
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Sheet not found or access denied.']);
+            return;
+        }
+        $maxOrder = LeadGroup::where('lead_sheet_id', $sheetId)->max('sort_order') ?? 0;
+        $group = LeadGroup::create([
+            'lead_sheet_id' => $sheetId,
+            'name' => trim($this->newGroupName),
+            'sort_order' => $maxOrder + 1,
+        ]);
+        $this->newGroupName = '';
+        $this->groupFilter = (string) $group->id;
+        $this->loadSheetLeads();
+        $this->resetValidation();
+        $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Tab added.']);
+    }
+
+    public function removeGroup($groupId)
+    {
+        $group = LeadGroup::find($groupId);
+        if (!$group) return;
+        $sheet = $group->leadSheet;
+        if (!$sheet || $sheet->created_by !== auth()->id()) {
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Access denied.']);
+            return;
+        }
+        $group->leads()->update(['lead_group_id' => null]);
+        $group->delete();
+        if ($this->groupFilter == $groupId) $this->groupFilter = '';
+        $this->loadSheetLeads();
+        $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Tab removed. Leads in it are now ungrouped.']);
     }
 
     #[On('lead-created')]
@@ -69,122 +115,89 @@ new class extends Component
     public function updatedLeadsData($value, $key)
     {
         try {
-            // Validate user and role
-            if (!auth()->check() || !auth()->user()->isScrapper()) {
+            if (!auth()->check()) {
+                return;
+            }
+            $sheet = $this->sheetFilter ? LeadSheet::find($this->sheetFilter) : null;
+            $canEdit = $sheet && $sheet->created_by === auth()->id() && (auth()->user()->isScrapper() || auth()->user()->isFrontSale());
+            if (!$canEdit) {
                 return;
             }
 
-            // Validate sheet filter exists
             if (!$this->sheetFilter) {
                 return;
             }
 
-            // Parse key to get index and field
-            $parts = explode('.', $key, 2);
-            if (count($parts) !== 2) {
+            [$index, $field] = explode('.', $key) + [null, null];
+            if ($index === null || $field === null) {
                 return;
             }
 
-            [$indexStr, $field] = $parts;
-            $index = (int) $indexStr;
-
-            // Validate index is numeric and within bounds
-            if (!is_numeric($indexStr) || $index < 0 || !isset($this->leadsData[$index])) {
-                return;
-            }
-
-            // Validate field is allowed
             $allowed = ['name', 'email', 'services', 'phone', 'location', 'position', 'platform', 'linkedin', 'detail', 'web_link'];
             if (!in_array($field, $allowed, true)) {
                 return;
             }
 
-            // Get row and validate it exists
             $row = $this->leadsData[$index] ?? null;
-            if (!$row || !is_array($row)) {
+            if (!$row) {
                 return;
             }
 
-            // Normalize value - convert empty strings to null for optional fields
+            // Trim value
             $value = is_string($value) ? trim($value) : $value;
-            if ($value === '' && $field !== 'name') {
-                $value = null;
-            }
 
-            // Handle name field updates for existing leads
-            // Don't auto-delete - just update the name field
-            // This prevents accidental deletion and index confusion
-            if ($field === 'name' && !empty($row['id'])) {
+            if ($field === 'name' && $row['id'] && $value === '') {
                 try {
-                    // Update the name field (even if empty) - don't delete the lead
                     Lead::where('id', $row['id'])
                         ->where('created_by', auth()->id())
-                        ->update(['name' => $value ?: '']);
-                    
-                    // Update local data to reflect the change
-                    $this->leadsData[$index]['name'] = $value;
+                        ->delete();
+                    array_splice($this->leadsData, (int) $index, 1);
+                    $this->ensureEmptyRow();
                     $this->dispatch('lead-updated');
                 } catch (\Exception $e) {
-                    \Illuminate\Support\Facades\Log::error('Error updating lead name: ' . $e->getMessage());
-                    $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to update name.']);
+                    \Illuminate\Support\Facades\Log::error('Error deleting lead: ' . $e->getMessage());
+                    $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to delete lead.']);
                 }
                 return;
             }
 
-            // Validate email format if provided
-            if ($field === 'email' && !empty($value) && !filter_var($value, FILTER_VALIDATE_EMAIL)) {
+            if ($field === 'email' && $value && !filter_var($value, FILTER_VALIDATE_EMAIL)) {
                 $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Invalid email format.']);
                 return;
             }
 
-            // Handle new lead creation
             if (empty($row['id'])) {
-                // Don't create if name is empty
-                $nameValue = trim($row['name'] ?? '');
-                if (empty($nameValue)) {
+                if (empty($row['name'])) {
                     return;
                 }
 
-                // Prevent duplicate creation attempts
-                $pendingKey = "{$index}_{$nameValue}";
-                if (!empty($this->pendingCreates[$pendingKey])) {
+                if (!empty($this->pendingCreates[$index])) {
                     return;
                 }
 
-                $this->pendingCreates[$pendingKey] = true;
+                $this->pendingCreates[$index] = true;
 
                 try {
-                    // Verify sheet still exists and belongs to user
-                    $sheet = LeadSheet::where('id', $this->sheetFilter)
-                        ->where('created_by', auth()->id())
-                        ->first();
-
-                    if (!$sheet) {
-                        $this->pendingCreates[$pendingKey] = false;
-                        $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Sheet not found or access denied.']);
-                        return;
-                    }
-
-                    // Check for existing lead to prevent duplicates
                     $existingLead = Lead::where('created_by', auth()->id())
                         ->where('lead_sheet_id', $this->sheetFilter)
-                        ->where('name', $nameValue)
+                        ->where('name', $row['name'])
                         ->whereDate('lead_date', now()->toDateString())
+                        ->orderBy('created_at', 'desc')
                         ->first();
 
                     if ($existingLead) {
                         $this->leadsData[$index]['id'] = $existingLead->id;
-                        unset($this->pendingCreates[$pendingKey]);
+                        $this->pendingCreates[$index] = false;
                         return;
                     }
 
-                    // Create new lead
                     $lead = Lead::create([
                         'created_by' => auth()->id(),
                         'lead_sheet_id' => $this->sheetFilter,
+                        'lead_group_id' => $this->groupFilter ?: null,
                         'lead_date' => now()->toDateString(),
                         'status' => 'no response',
-                        'name' => $nameValue,
+                        'name' => trim($row['name']),
                         'email' => !empty($row['email']) ? trim($row['email']) : null,
                         'services' => !empty($row['services']) ? trim($row['services']) : null,
                         'phone' => !empty($row['phone']) ? trim($row['phone']) : null,
@@ -197,7 +210,7 @@ new class extends Component
                     ]);
 
                     // Notify sales users efficiently
-                    $salesUsers = User::whereIn('role', ['upsale', 'front_sale'])->get();
+                    $salesUsers = User::whereIn('role', ['sales', 'upsale', 'front_sale'])->get();
                     
                     if ($salesUsers->isNotEmpty()) {
                         $notifications = $salesUsers->map(function ($user) use ($lead) {
@@ -213,109 +226,60 @@ new class extends Component
                         })->toArray();
 
                         \App\Models\Notification::insert($notifications);
-                        // Dispatch event to refresh notification bells for all users
-                        $this->dispatch('notification-created');
                     }
 
-                    // Update local data with the new lead ID
                     $this->leadsData[$index]['id'] = $lead->id;
-                    unset($this->pendingCreates[$pendingKey]);
-                    
-                    // Ensure empty row exists after creating new lead
-                    $this->ensureEmptyRow();
                     $this->dispatch('lead-created');
+                    $this->ensureEmptyRow();
+                    $this->pendingCreates[$index] = false;
                 } catch (\Exception $e) {
-                    \Illuminate\Support\Facades\Log::error('Error creating lead in table: ' . $e->getMessage(), [
-                        'user_id' => auth()->id(),
-                        'sheet_id' => $this->sheetFilter,
-                        'row_data' => $row,
-                    ]);
+                    \Illuminate\Support\Facades\Log::error('Error creating lead in table: ' . $e->getMessage());
                     $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to save lead. Please try again.']);
-                    unset($this->pendingCreates[$pendingKey]);
+                    $this->pendingCreates[$index] = false;
                 }
                 return;
             }
 
             // Update existing lead
             try {
-                // Verify lead still exists and belongs to user
-                $lead = Lead::where('id', $row['id'])
+                Lead::where('id', $row['id'])
                     ->where('created_by', auth()->id())
-                    ->first();
-
-                if (!$lead) {
-                    // Lead was deleted, reload data
-                    $this->loadSheetLeads();
-                    $this->dispatch('show-toast', ['type' => 'warning', 'message' => 'Lead was deleted. Data refreshed.']);
-                    return;
-                }
-
-                // Update the field
-                $lead->update([$field => $value]);
+                    ->update([$field => $value]);
             } catch (\Exception $e) {
-                \Illuminate\Support\Facades\Log::error('Error updating lead: ' . $e->getMessage(), [
-                    'lead_id' => $row['id'] ?? null,
-                    'field' => $field,
-                    'value' => $value,
-                ]);
+                \Illuminate\Support\Facades\Log::error('Error updating lead: ' . $e->getMessage());
                 $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to update lead.']);
             }
         } catch (\Exception $e) {
-            \Illuminate\Support\Facades\Log::error('Error in updatedLeadsData: ' . $e->getMessage(), [
-                'key' => $key,
-                'value' => $value,
-            ]);
+            \Illuminate\Support\Facades\Log::error('Error in updatedLeadsData: ' . $e->getMessage());
         }
     }
 
     public function loadSheetLeads()
     {
         try {
-            // Validate user and role (table view is scrapper-only; list view can be sales/admin)
-            if (!auth()->check()) {
+            if (!auth()->check() || !$this->sheetFilter) {
                 $this->leadsData = [$this->emptyRow()];
-                $this->lastLoadedSheetId = null;
-                return;
-            }
-            // For table view we need scrapper; list view doesn't use leadsData
-            if (auth()->user()->isScrapper() === false) {
-                $this->leadsData = [$this->emptyRow()];
-                $this->lastLoadedSheetId = null;
                 return;
             }
 
-            // Validate sheet filter (cast to int for consistent querying)
-            $sheetId = is_numeric($this->sheetFilter) ? (int) $this->sheetFilter : null;
-            if (!$sheetId) {
+            $sheet = LeadSheet::find($this->sheetFilter);
+            if (!$sheet || $sheet->created_by !== auth()->id()) {
                 $this->leadsData = [$this->emptyRow()];
-                $this->lastLoadedSheetId = null;
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Selected sheet not found or access denied.']);
+                return;
+            }
+            // Scrapper or front_sale can load leads only for their own sheets
+            if (!auth()->user()->isScrapper() && !auth()->user()->isFrontSale()) {
+                $this->leadsData = [$this->emptyRow()];
                 return;
             }
 
-            // Verify sheet exists and belongs to user (scrappers) or allow any sheet for sales/admin viewing
-            $sheet = LeadSheet::where('id', $sheetId)->first();
-
-            if (!$sheet) {
-                $this->leadsData = [$this->emptyRow()];
-                $this->lastLoadedSheetId = null;
-                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Selected sheet not found.']);
-                return;
-            }
-
-            // Scrappers can only load leads from their own sheets
-            if (auth()->user()->isScrapper() && $sheet->created_by !== auth()->id()) {
-                $this->leadsData = [$this->emptyRow()];
-                $this->lastLoadedSheetId = null;
-                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Access denied to this sheet.']);
-                return;
-            }
-
-            // Load leads for this sheet
-            // Scrappers see only their own leads in their own sheets
             $leadsQuery = Lead::where('created_by', auth()->id())
-                ->where('lead_sheet_id', $sheetId);
-            
-            $leads = $leadsQuery
+                ->where('lead_sheet_id', $this->sheetFilter);
+            if ($this->groupFilter) {
+                $leadsQuery->where('lead_group_id', $this->groupFilter);
+            }
+            $this->leadsData = $leadsQuery->orderBy('created_at', 'desc')
                 ->get()
                 ->map(function ($lead) {
                     return [
@@ -335,110 +299,20 @@ new class extends Component
                 ->values()
                 ->all();
 
-            // Log for debugging
-            \Illuminate\Support\Facades\Log::info('Loaded sheet leads for scrapper', [
-                'user_id' => auth()->id(),
-                'user_name' => auth()->user()->name,
-                'sheet_id' => $sheetId,
-                'sheet_name' => $sheet->name ?? 'Unknown',
-                'leads_count' => count($leads),
-                'query_result' => $leadsQuery->toSql(),
-            ]);
-
-            $this->leadsData = $leads;
-            $this->lastLoadedSheetId = (string) $sheetId;
-            $this->pendingCreates = []; // Clear pending creates when reloading
             $this->ensureEmptyRow();
         } catch (\Exception $e) {
-            \Illuminate\Support\Facades\Log::error('Error loading sheet leads: ' . $e->getMessage(), [
-                'user_id' => auth()->id(),
-                'sheet_id' => $this->sheetFilter,
-            ]);
+            \Illuminate\Support\Facades\Log::error('Error loading sheet leads: ' . $e->getMessage());
             $this->leadsData = [$this->emptyRow()];
-            $this->lastLoadedSheetId = null;
-            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to load leads. Please try again.']);
-        }
-    }
-
-    public function deleteLeadFromTable($leadId, $index)
-    {
-        try {
-            if (!auth()->check() || !auth()->user()->isScrapper()) {
-                return;
-            }
-
-            // Verify lead exists and belongs to user
-            $lead = Lead::where('id', $leadId)
-                ->where('created_by', auth()->id())
-                ->first();
-
-            if (!$lead) {
-                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Lead not found or access denied.']);
-                return;
-            }
-
-            // Delete the lead
-            $lead->delete();
-
-            // Remove from array using the lead ID to find the correct row
-            foreach ($this->leadsData as $idx => $row) {
-                if (isset($row['id']) && $row['id'] == $leadId) {
-                    unset($this->leadsData[$idx]);
-                    break;
-                }
-            }
-
-            // Re-index array
-            $this->leadsData = array_values($this->leadsData);
-            
-            // Ensure empty row exists
-            $this->ensureEmptyRow();
-            $this->dispatch('lead-updated');
-            $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Lead deleted successfully.']);
-        } catch (\Exception $e) {
-            \Illuminate\Support\Facades\Log::error('Error deleting lead from table: ' . $e->getMessage());
-            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to delete lead.']);
+            $this->dispatch('show-toast', type: 'error', message: 'Failed to load leads. Please try again.');
         }
     }
 
     public function ensureEmptyRow()
     {
-        // Always ensure there's exactly one empty row at the end
-        if (empty($this->leadsData)) {
+        $last = end($this->leadsData);
+        if (!$last || !empty($last['id']) || array_filter($last)) {
             $this->leadsData[] = $this->emptyRow();
-            return;
         }
-
-        // Remove any existing empty rows from the end
-        while (!empty($this->leadsData)) {
-            $lastIndex = count($this->leadsData) - 1;
-            $last = $this->leadsData[$lastIndex] ?? null;
-            
-            if (!$last) {
-                break;
-            }
-            
-            // Check if this is an empty row (no ID and all fields are empty)
-            $isEmpty = empty($last['id']);
-            if ($isEmpty) {
-                foreach ($last as $key => $val) {
-                    if ($key !== 'id' && $val !== null && $val !== '') {
-                        $isEmpty = false;
-                        break;
-                    }
-                }
-            }
-            
-            // If it's empty, remove it; otherwise stop
-            if ($isEmpty) {
-                array_pop($this->leadsData);
-            } else {
-                break;
-            }
-        }
-
-        // Always add exactly one empty row at the end
-        $this->leadsData[] = $this->emptyRow();
     }
 
     public function emptyRow(): array
@@ -460,63 +334,27 @@ new class extends Component
 
     public function mount()
     {
-        // Sync from query string so initial load has correct sheet when URL has ?sheetFilter=
-        if (request()->has('sheetFilter') && request()->get('sheetFilter') !== '') {
-            $this->sheetFilter = request()->get('sheetFilter');
-        }
+        // Set view mode from query parameter
         if (request()->has('viewMode') && in_array(request()->get('viewMode'), ['table', 'list'])) {
             $this->viewMode = request()->get('viewMode');
         }
         
-        // Load sheet leads for table view when we have a sheet selected
-        if (auth()->check() && auth()->user()->isScrapper() && $this->viewMode === 'table' && $this->sheetFilter) {
-            $this->loadSheetLeads();
+        // Load sheet leads for table view (scrapper or front_sale on their own sheet)
+        if (auth()->check() && $this->viewMode === 'table' && $this->sheetFilter) {
+            $sheet = LeadSheet::find($this->sheetFilter);
+            if ($sheet && $sheet->created_by === auth()->id() && (auth()->user()->isScrapper() || auth()->user()->isFrontSale()) && empty($this->leadsData)) {
+                $this->loadSheetLeads();
+            }
         }
     }
 
     public function render()
     {
         try {
-            // For scrapper in table view: ensure sheet leads are loaded when sheet is selected
-            if (auth()->check() 
-                && auth()->user()->isScrapper() 
-                && $this->viewMode === 'table' 
-                && $this->sheetFilter) {
-                
-                $currentSheetId = is_numeric($this->sheetFilter) ? (string) ((int) $this->sheetFilter) : null;
-                
-                // Determine if we need to load
-                $needsLoad = false;
-                
-                // Case 1: Never loaded before
-                if ($this->lastLoadedSheetId === null) {
-                    $needsLoad = true;
-                }
-                // Case 2: Sheet changed
-                elseif ($currentSheetId && $this->lastLoadedSheetId !== $currentSheetId) {
-                    $needsLoad = true;
-                }
-                // Case 3: Only have empty placeholder row (no real leads loaded)
-                elseif (empty($this->leadsData) || (count($this->leadsData) === 1 && empty($this->leadsData[0]['id'] ?? null))) {
-                    // Check if the single row is truly empty (all fields empty)
-                    if (count($this->leadsData) === 1) {
-                        $row = $this->leadsData[0];
-                        $allEmpty = true;
-                        foreach ($row as $key => $val) {
-                            if ($key !== 'id' && $val !== null && $val !== '') {
-                                $allEmpty = false;
-                                break;
-                            }
-                        }
-                        if ($allEmpty) {
-                            $needsLoad = true;
-                        }
-                    } else {
-                        $needsLoad = true;
-                    }
-                }
-                
-                if ($needsLoad) {
+            // Load sheet leads for table view (scrapper or front_sale on their own sheet)
+            if (auth()->check() && $this->viewMode === 'table' && $this->sheetFilter) {
+                $currentSheet = LeadSheet::find($this->sheetFilter);
+                if ($currentSheet && $currentSheet->created_by === auth()->id() && (auth()->user()->isScrapper() || auth()->user()->isFrontSale()) && empty($this->leadsData)) {
                     $this->loadSheetLeads();
                 }
             }
@@ -529,15 +367,12 @@ new class extends Component
                 if (auth()->user()->isScrapper()) {
                     $query->where('created_by', auth()->id());
                 } elseif (auth()->user()->isSalesTeam()) {
-                    // Sales: only leads from sheets assigned to one of their teams
+                    // Sales: leads from sheets they created OR sheets assigned to their teams
                     $userTeamIds = auth()->user()->teams()->pluck('teams.id')->toArray();
-                    if (!empty($userTeamIds)) {
-                        $query->whereHas('leadSheet', function ($q) use ($userTeamIds) {
-                            $q->whereHas('teams', fn ($t) => $t->whereIn('teams.id', $userTeamIds));
-                        });
-                    } else {
-                        $query->whereRaw('1 = 0'); // no teams = no leads
-                    }
+                    $query->whereHas('leadSheet', function ($q) use ($userTeamIds) {
+                        $q->where('created_by', auth()->id())
+                            ->orWhereHas('teams', fn ($t) => $t->whereIn('teams.id', $userTeamIds));
+                    });
                 }
                 // Admin: no extra filter (sees all)
             }
@@ -568,7 +403,12 @@ new class extends Component
             // Apply sheet filter
             if ($this->sheetFilter) {
                 $query->where('lead_sheet_id', $this->sheetFilter);
-            } elseif (auth()->check() && auth()->user()->isScrapper() && $this->viewMode === 'list') {
+            }
+            // Apply group (tab) filter when viewing one sheet
+            if ($this->groupFilter) {
+                $query->where('lead_group_id', $this->groupFilter);
+            }
+            if (auth()->check() && auth()->user()->isScrapper() && $this->viewMode === 'list' && !$this->sheetFilter) {
                 // For list view, show all leads if no sheet filter, but for table view, require sheet filter
                 // This is already handled in the view logic
             }
@@ -580,24 +420,32 @@ new class extends Component
                 if (auth()->user()->isScrapper()) {
                     $sheetsQuery->where('created_by', auth()->id());
                 } elseif (auth()->user()->isSalesTeam()) {
+                    // Sales: sheets they created OR sheets assigned to their teams
                     $userTeamIds = auth()->user()->teams()->pluck('teams.id')->toArray();
-                    if (!empty($userTeamIds)) {
-                        $sheetsQuery->whereHas('teams', fn ($q) => $q->whereIn('teams.id', $userTeamIds));
-                    } else {
-                        $sheetsQuery->whereRaw('1 = 0');
-                    }
+                    $sheetsQuery->where(function ($q) use ($userTeamIds) {
+                        $q->where('created_by', auth()->id())
+                            ->orWhereHas('teams', fn ($t) => $t->whereIn('teams.id', $userTeamIds));
+                    });
                 }
+                // Admin: no extra filter (sees all sheets)
+            }
+
+            $groups = collect([]);
+            if ($this->sheetFilter) {
+                $groups = LeadGroup::where('lead_sheet_id', $this->sheetFilter)->orderBy('sort_order')->orderBy('name')->get();
             }
 
             return view('components.leads.⚡index', [
                 'leads' => $leads,
                 'sheets' => $sheetsQuery->get(),
+                'groups' => $groups,
             ]);
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::error('Error rendering leads index: ' . $e->getMessage());
             return view('components.leads.⚡index', [
                 'leads' => \Illuminate\Pagination\LengthAwarePaginator::empty(),
                 'sheets' => collect([]),
+                'groups' => collect([]),
             ]);
         }
     }
@@ -636,12 +484,6 @@ new class extends Component
     <!-- Create Lead Modal -->
     @if(auth()->user()->canCreateLeads())
         <livewire:leads.create />
-    @endif
-
-    @if(auth()->user()->isSalesTeam())
-        <div class="mb-4 px-4 py-2 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
-            <strong>Your view:</strong> You only see leads from sheets that are assigned to your team(s). If you don’t see a sheet or any leads, ask your admin to add you to a team and assign that sheet to the team.
-        </div>
     @endif
 
     <!-- Search and Filter -->
@@ -686,8 +528,44 @@ new class extends Component
         @error('sheetFilter') <span class="text-red-500 text-sm mt-2 block">{{ $message }}</span> @enderror
     </div>
 
-    <!-- View Mode Toggle for Scrapper -->
-    @if(auth()->user()->isScrapper())
+    <!-- Tabs (groups) when a sheet is selected: All, then each table/tab, add/remove if owner -->
+    @if($sheetFilter && (auth()->user()->isScrapper() || auth()->user()->isSalesTeam() || auth()->user()->isAdmin()))
+        @php
+            $currentSheet = $sheets->firstWhere('id', (int)$sheetFilter);
+            $canEditTabs = $currentSheet && $currentSheet->created_by === auth()->id() && (auth()->user()->isScrapper() || auth()->user()->isFrontSale());
+        @endphp
+        <div class="bg-white rounded-t-xl border border-gray-200 border-b-0 overflow-hidden mb-0">
+            <div class="flex items-end border-b border-gray-200 bg-gray-50/80 overflow-x-auto">
+                <button type="button" wire:click="$set('groupFilter', '')"
+                    class="px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 -mb-px transition-colors {{ $groupFilter === '' ? 'bg-white text-blue-600 border-blue-600' : 'text-gray-600 border-transparent hover:bg-gray-100' }}">
+                    All
+                </button>
+                @foreach($groups as $group)
+                    <button type="button" wire:click="$set('groupFilter', '{{ $group->id }}')"
+                        class="group px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 -mb-px transition-colors flex items-center gap-1.5 {{ (string)$groupFilter === (string)$group->id ? 'bg-white text-blue-600 border-blue-600' : 'text-gray-600 border-transparent hover:bg-gray-100' }}">
+                        <span>{{ $group->name }}</span>
+                        @if($canEditTabs)
+                            <span class="opacity-0 group-hover:opacity-100 hover:opacity-100 text-gray-400 hover:text-red-600 cursor-pointer text-base leading-none select-none" onclick="event.stopPropagation(); if(confirm('Remove this tab? Leads stay but become ungrouped.')) { @this.call('removeGroup', {{ $group->id }}) }">×</span>
+                        @endif
+                    </button>
+                @endforeach
+                @if($canEditTabs)
+                    <form wire:submit.prevent="addGroup" class="flex items-center gap-1 ml-1 pb-1.5 border-b-2 border-transparent -mb-px">
+                        <input type="text" wire:model="newGroupName" placeholder="+ New tab" maxlength="255" class="w-24 px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500">
+                        <button type="submit" class="px-2 py-1.5 text-sm text-blue-600 hover:bg-blue-50 rounded font-medium">Add</button>
+                    </form>
+                    @error('newGroupName') <span class="text-red-500 text-xs ml-2">{{ $message }}</span> @enderror
+                @endif
+            </div>
+        </div>
+    @endif
+
+    <!-- View Mode Toggle for Scrapper and Front Sale (for their own sheets) -->
+    @php
+        $currentSheetForView = $sheetFilter ? $sheets->firstWhere('id', (int)$sheetFilter) : null;
+        $canUseTableView = $currentSheetForView && $currentSheetForView->created_by === auth()->id() && (auth()->user()->isScrapper() || auth()->user()->isFrontSale());
+    @endphp
+    @if($canUseTableView)
         <div class="mb-4 flex justify-end">
             <div class="inline-flex rounded-lg border border-gray-300 bg-white shadow-sm">
                 @php
@@ -722,8 +600,8 @@ new class extends Component
         </div>
     @endif
 
-    <!-- Leads Table View (for Scrapper when viewMode is 'table') -->
-    @if(auth()->user()->isScrapper() && $viewMode === 'table')
+    <!-- Leads Table View (for Scrapper or Front Sale on their sheet when viewMode is 'table') -->
+    @if($canUseTableView && $viewMode === 'table')
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
             <div class="overflow-x-auto">
                 <table class="min-w-full divide-y divide-gray-200">
@@ -739,12 +617,11 @@ new class extends Component
                             <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">LinkedIn</th>
                             <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Detail</th>
                             <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Web Link</th>
-                            <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Actions</th>
                         </tr>
                     </thead>
                     <tbody class="bg-white divide-y divide-gray-200">
                         @forelse($leadsData as $index => $row)
-                            <tr wire:key="lead-row-{{ $row['id'] ?? 'new-' . $index }}" class="{{ empty($row['id']) ? 'bg-blue-50' : 'hover:bg-gray-50' }}">
+                            <tr class="{{ empty($row['id']) ? 'bg-blue-50' : 'hover:bg-gray-50' }}">
                                 <td class="px-4 py-2">
                                     <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.name" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Name" @if(!$sheetFilter) disabled @endif>
                                 </td>
@@ -775,26 +652,10 @@ new class extends Component
                                 <td class="px-4 py-2">
                                     <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.web_link" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Web link" @if(!$sheetFilter) disabled @endif>
                                 </td>
-                                @if(!empty($row['id']))
-                                    <td class="px-4 py-2">
-                                        <button 
-                                            wire:click="deleteLeadFromTable({{ $row['id'] }}, {{ $index }})"
-                                            onclick="return confirm('Are you sure you want to delete this lead?')"
-                                            class="px-2 py-1 text-red-600 hover:text-red-800 hover:bg-red-50 rounded transition-colors"
-                                            title="Delete lead"
-                                        >
-                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                                            </svg>
-                                        </button>
-                                    </td>
-                                @else
-                                    <td class="px-4 py-2"></td>
-                                @endif
                             </tr>
                         @empty
                             <tr>
-                                <td colspan="11" class="px-6 py-12 text-center text-gray-500">
+                                <td colspan="10" class="px-6 py-12 text-center text-gray-500">
                                     Select a sheet to view and add leads.
                                 </td>
                             </tr>
@@ -803,7 +664,7 @@ new class extends Component
                 </table>
             </div>
         </div>
-    @elseif(auth()->user()->isScrapper() && $viewMode === 'list')
+    @elseif($canUseTableView && $viewMode === 'list')
         <!-- List View for Scrapper (same as sales team view) -->
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
             <div class="overflow-x-auto">

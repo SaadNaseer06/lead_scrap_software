@@ -11,6 +11,7 @@ class Lead extends Model
         'created_by',
         'opened_by',
         'lead_sheet_id',
+        'lead_group_id',
         'lead_date',
         'name',
         'email',
@@ -57,6 +58,14 @@ class Lead extends Model
     public function leadSheet(): BelongsTo
     {
         return $this->belongsTo(LeadSheet::class);
+    }
+
+    /**
+     * Get the group (table) this lead belongs to within the sheet
+     */
+    public function leadGroup(): BelongsTo
+    {
+        return $this->belongsTo(LeadGroup::class);
     }
 
     /**

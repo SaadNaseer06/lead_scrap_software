@@ -49,14 +49,12 @@ new class extends Component
                 // Scrappers only see their own sheets
                 $query->where('created_by', auth()->id());
             } else {
-                // Sales (front_sale, upsale): see sheets assigned to a team they belong to
+                // Sales (front_sale, upsale): sheets they created OR sheets assigned to their teams
                 $userTeamIds = auth()->user()->teams()->pluck('teams.id')->toArray();
-                if (!empty($userTeamIds)) {
-                    $query->whereHas('teams', fn ($q) => $q->whereIn('teams.id', $userTeamIds));
-                } else {
-                    // User has no teams: show nothing (or no sheets)
-                    $query->whereRaw('1 = 0');
-                }
+                $query->where(function ($q) use ($userTeamIds) {
+                    $q->where('created_by', auth()->id())
+                        ->orWhereHas('teams', fn ($t) => $t->whereIn('teams.id', $userTeamIds));
+                });
             }
         }
 

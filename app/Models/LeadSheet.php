@@ -19,6 +19,11 @@ class LeadSheet extends Model
         return $this->belongsTo(User::class, 'created_by');
     }
 
+    public function leadGroups(): HasMany
+    {
+        return $this->hasMany(LeadGroup::class)->orderBy('sort_order')->orderBy('name');
+    }
+
     public function leads(): HasMany
     {
         return $this->hasMany(Lead::class);

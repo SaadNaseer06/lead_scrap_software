@@ -17,10 +17,11 @@ new class extends Component
             $this->loadLead();
             
             if (!$this->lead) {
-                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Lead not found.']);
+                session()->flash('message', 'Lead removed.');
+                $this->redirect(route('dashboard'));
                 return;
             }
-            
+
             // If lead is not opened and user is sales or admin, mark as opened
             if (auth()->check() && !$this->lead->opened_by && (auth()->user()->isSalesTeam() || auth()->user()->isAdmin())) {
                 try {
@@ -53,14 +54,17 @@ new class extends Component
     public function loadLead()
     {
         try {
-            $this->lead = Lead::with(['creator', 'opener', 'comments.user'])->find($this->leadId);
-            
+            $this->lead = Lead::with(['creator', 'opener', 'comments.user', 'leadSheet', 'leadGroup'])->find($this->leadId);
+            // When lead was removed from DB while user had it open: session message + redirect (no 404)
             if (!$this->lead) {
-                abort(404, 'Lead not found');
+                session()->flash('message', 'Lead removed.');
+                $this->redirect(route('dashboard'));
             }
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             \Illuminate\Support\Facades\Log::error('Error loading lead: ' . $e->getMessage());
-            abort(404, 'Lead not found');
+            $this->lead = null;
+            session()->flash('message', 'Lead removed.');
+            $this->redirect(route('dashboard'));
         }
     }
 
@@ -77,6 +81,12 @@ new class extends Component
             if (!auth()->check()) {
                 $this->dispatch('show-toast', ['type' => 'error', 'message' => 'You must be logged in.']);
                 return;
+            }
+
+            $this->loadLead();
+            if (!$this->lead) {
+                session()->flash('message', 'Lead removed.');
+                return $this->redirect(route('dashboard'));
             }
 
             if (!auth()->user()->isSalesTeam() && !auth()->user()->isAdmin()) {
@@ -115,6 +125,12 @@ new class extends Component
                 return;
             }
 
+            $this->loadLead();
+            if (!$this->lead) {
+                session()->flash('message', 'Lead removed.');
+                return $this->redirect(route('dashboard'));
+            }
+
             if (!auth()->user()->isSalesTeam()) {
                 $this->dispatch('show-toast', type: 'error', message: 'You do not have permission to add comments.');
                 return;
@@ -145,20 +161,40 @@ new class extends Component
 
     public function render()
     {
-        try {
-            // Reload lead to ensure fresh data
-            if ($this->leadId) {
-                $this->loadLead();
+        if ($this->leadId) {
+            $this->loadLead();
+            // If lead was removed from DB, loadLead() redirects; otherwise ensure we never render 404
+            if (!$this->lead) {
+                session()->flash('message', 'Lead removed.');
+                $this->redirect(route('dashboard'));
             }
-            return view('components.leads.⚡show');
-        } catch (\Exception $e) {
-            \Illuminate\Support\Facades\Log::error('Error rendering lead show: ' . $e->getMessage());
-            abort(404, 'Lead not found');
         }
+        return view('components.leads.⚡show');
     }
 };?>
 
-<div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-6" wire:poll.5s="loadLead">
+<div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-6" wire:poll.3s="loadLead">
+    @if(!$lead)
+        <!-- Lead removed (e.g. front_sale cleared name = lead deleted): show message and redirect – never 404 -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden" x-data="{ countdown: 2 }" x-init="setInterval(() => { if (countdown > 0) countdown--; else window.location = '{{ route('dashboard') }}'; }, 1000)">
+            <div class="p-8 sm:p-12 text-center">
+                <div class="w-16 h-16 mx-auto mb-4 rounded-full bg-amber-100 flex items-center justify-center">
+                    <svg class="w-8 h-8 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+                    </svg>
+                </div>
+                <h1 class="text-xl font-bold text-gray-900 mb-2">Lead removed</h1>
+                <p class="text-gray-600 mb-2 max-w-md mx-auto">This lead has been removed by the person who created it.</p>
+                <p class="text-sm text-gray-500 mb-6">Redirecting you to the dashboard in <span x-text="countdown"></span> second(s)...</p>
+                <a href="{{ route('dashboard') }}" class="inline-flex items-center px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg shadow-sm transition-colors">
+                    <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m0 0l-7 7-7-7m7 7V21"></path>
+                    </svg>
+                    Go to Dashboard
+                </a>
+            </div>
+        </div>
+    @else
     <!-- Header -->
     <div class="mb-6 flex items-center justify-between">
         <div class="flex items-center space-x-4">
@@ -170,6 +206,18 @@ new class extends Component
             <div>
                 <h1 class="text-3xl font-bold text-gray-900">{{ $lead->name }}</h1>
                 <p class="text-gray-600 mt-1">Lead Details & Information</p>
+                @if($lead->leadSheet || $lead->leadGroup)
+                    <p class="text-sm text-gray-500 mt-1">
+                        @if($lead->leadSheet)
+                            <span>Sheet: {{ $lead->leadSheet->name }}</span>
+                        @endif
+                        @if($lead->leadGroup)
+                            <span class="{{ $lead->leadSheet ? 'ml-2' : '' }}">Table: <span class="font-medium text-gray-700">{{ $lead->leadGroup->name }}</span></span>
+                        @elseif($lead->leadSheet)
+                            <span class="ml-2 text-gray-400">— No table</span>
+                        @endif
+                    </p>
+                @endif
             </div>
         </div>
     </div>
@@ -413,7 +461,5 @@ new class extends Component
             @endif
         </div>
     </div>
+    @endif
 </div>
-
-
-

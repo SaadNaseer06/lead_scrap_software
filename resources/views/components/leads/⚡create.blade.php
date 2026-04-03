@@ -112,7 +112,7 @@ new class extends Component
             }
 
             $rules = $this->rules;
-            if (auth()->user()->isScrapper()) {
+            if (auth()->user()->isScrapper() || auth()->user()->isFrontSale()) {
                 $rules['lead_sheet_id'] = 'required|exists:lead_sheets,id';
             }
             
@@ -151,7 +151,7 @@ new class extends Component
                 $lead = Lead::create($leadData);
 
                 // Notify all sales users efficiently
-                $salesUsers = User::whereIn('role', ['upsale', 'front_sale'])->get();
+                $salesUsers = User::whereIn('role', ['sales', 'upsale', 'front_sale'])->get();
                 
                 if ($salesUsers->isNotEmpty()) {
                     $notifications = $salesUsers->map(function ($user) use ($lead) {
@@ -167,8 +167,6 @@ new class extends Component
                     })->toArray();
 
                     \App\Models\Notification::insert($notifications);
-                    // Dispatch event to refresh notification bells for all users
-                    $this->dispatch('notification-created');
                 }
 
                 DB::commit();
@@ -276,7 +274,7 @@ new class extends Component
                             <div>
                                 <label for="lead_sheet_id" class="block text-sm font-semibold text-gray-700 mb-2">
                                     Sheet
-                                    @if(auth()->user()->isScrapper())
+                                    @if(auth()->user()->isScrapper() || auth()->user()->isFrontSale())
                                         <span class="text-red-500">*</span>
                                     @endif
                                 </label>
