@@ -2,6 +2,8 @@
 
 use App\Models\Lead;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\UserController;
 
@@ -43,6 +45,19 @@ Route::middleware('auth')->group(function () {
     Route::get('/sheets', function () {
         return view('sheets.index');
     })->name('sheets.index');
+
+    Route::post('/notifications/mark-all-read', function () {
+        $update = ['read' => true];
+        if (Schema::hasColumn('notifications', 'read_at')) {
+            $update['read_at'] = now();
+        }
+
+        DB::table('notifications')
+            ->where('user_id', auth()->id())
+            ->update($update);
+
+        return redirect()->back();
+    })->name('notifications.mark-all-read');
     
     // Users Routes (Admin Only) - Real-time with Livewire
     Route::middleware('role:admin')->group(function () {

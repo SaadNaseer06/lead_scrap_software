@@ -3,6 +3,7 @@
 use App\Models\Lead;
 use Livewire\Component;
 use Livewire\Attributes\On;
+use Illuminate\Support\Facades\Schema;
 
 new class extends Component
 {
@@ -17,9 +18,38 @@ new class extends Component
             $this->loadLead();
             
             if (!$this->lead) {
+                if (auth()->check() && $this->leadId) {
+                    $update = ['read' => true];
+                    if (Schema::hasColumn('notifications', 'read_at')) {
+                        $update['read_at'] = now();
+                    }
+
+                    \App\Models\Notification::where('user_id', auth()->id())
+                        ->where('lead_id', $this->leadId)
+                        ->where('read', false)
+                        ->update($update);
+
+                    \App\Services\NotificationService::broadcastStateForUser(auth()->id(), null, 'read');
+                    $this->dispatch('notification-created');
+                }
                 session()->flash('message', 'Lead removed.');
                 $this->redirect(route('dashboard'));
                 return;
+            }
+
+            if (auth()->check()) {
+                $update = ['read' => true];
+                if (Schema::hasColumn('notifications', 'read_at')) {
+                    $update['read_at'] = now();
+                }
+
+                \App\Models\Notification::where('user_id', auth()->id())
+                    ->where('lead_id', $this->lead->id)
+                    ->where('read', false)
+                    ->update($update);
+
+                \App\Services\NotificationService::broadcastStateForUser(auth()->id(), null, 'read');
+                $this->dispatch('notification-created');
             }
 
             // If lead is not opened and user is sales or admin, mark as opened

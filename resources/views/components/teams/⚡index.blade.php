@@ -16,6 +16,7 @@ new class extends Component
     public $name = '';
     public $description = '';
     public $userIds = [];
+    public $successMessage = '';
 
     protected $queryString = ['search' => ['except' => '']];
 
@@ -41,6 +42,7 @@ new class extends Component
         $this->userIds = [];
         $this->showForm = true;
         $this->resetValidation();
+        $this->successMessage = '';
     }
 
     public function openEdit($teamId)
@@ -53,6 +55,7 @@ new class extends Component
         $this->userIds = $team->users->pluck('id')->map(fn ($id) => (string) $id)->toArray();
         $this->showForm = true;
         $this->resetValidation();
+        $this->successMessage = '';
     }
 
     public function closeForm()
@@ -84,6 +87,7 @@ new class extends Component
             $team->users()->sync(array_map('intval', $this->userIds));
             $this->dispatch('team-updated');
             $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Team updated successfully.']);
+            $this->successMessage = 'Team updated successfully.';
         } else {
             $team = Team::create([
                 'name' => trim($this->name),
@@ -92,6 +96,7 @@ new class extends Component
             $team->users()->sync(array_map('intval', $this->userIds));
             $this->dispatch('team-created');
             $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Team created successfully.']);
+            $this->successMessage = 'Team created successfully.';
         }
 
         $this->closeForm();
@@ -106,6 +111,7 @@ new class extends Component
         $team->delete();
         $this->dispatch('team-deleted');
         $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Team deleted.']);
+        $this->successMessage = 'Team deleted.';
     }
 
     public function render()
@@ -148,6 +154,12 @@ new class extends Component
         <div class="px-6 py-3 bg-blue-50 border-b border-blue-100">
             <p class="text-sm text-blue-800"><strong>How it works:</strong> 1) Create a team and add sales users (Front Sale / Upsale). 2) When a scrapper creates a sheet, they choose which team(s) can see it. 3) Only those team members will see that sheet and its leads on the Leads page.</p>
         </div>
+
+        @if($successMessage)
+            <div class="px-6 py-4 bg-emerald-50 border-b border-emerald-200 text-emerald-800">
+                {{ $successMessage }}
+            </div>
+        @endif
 
         @if($showForm)
             <div class="px-6 py-4 bg-gray-50 border-b border-gray-200">

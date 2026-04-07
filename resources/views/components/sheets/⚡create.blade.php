@@ -11,6 +11,15 @@ new class extends Component
 {
     public $name = '';
     public $teamIds = [];
+    public $successMessage = '';
+    public $formKey = 1;
+
+    public function updated()
+    {
+        if ($this->successMessage !== '') {
+            $this->successMessage = '';
+        }
+    }
 
     public function save()
     {
@@ -80,15 +89,16 @@ new class extends Component
                 ]);
 
                 // Reset form
-                $this->reset('name', 'teamIds');
+                $this->reset(['name', 'teamIds']);
                 $this->resetErrorBag();
+                $this->successMessage = 'Sheet created successfully!';
+                $this->formKey++;
 
                 // Dispatch events to refresh other components
-                $this->dispatch('sheet-created');
+                $this->dispatch('sheet-created', sheetId: $sheet->id);
                 
                 // Show success message
                 $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Sheet created successfully!']);
-                session()->flash('message', 'Sheet created successfully.');
                 
             } catch (\Exception $e) {
                 DB::rollBack();
@@ -144,6 +154,11 @@ new class extends Component
 ?>
 
 <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+    @if($successMessage)
+        <div class="mb-4 px-4 py-3 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-800">
+            {{ $successMessage }}
+        </div>
+    @endif
     @if($teams->isEmpty())
         <div class="px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800">
             <p class="font-medium">Cannot create a sheet yet</p>
@@ -151,7 +166,7 @@ new class extends Component
             <a href="{{ route('teams.index') }}" class="inline-block mt-3 text-sm font-medium text-amber-700 underline hover:text-amber-900">Go to Teams (admin only)</a>
         </div>
     @else
-        <form wire:submit="save" class="space-y-4">
+        <form wire:submit="save" wire:key="sheet-create-form-{{ $formKey }}" class="space-y-4">
             <div>
                 <label for="sheet_name" class="block text-sm font-semibold text-gray-700 mb-2">
                     Sheet Name <span class="text-red-500">*</span>

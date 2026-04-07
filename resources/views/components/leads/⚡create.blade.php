@@ -3,6 +3,7 @@
 use App\Models\Lead;
 use App\Models\User;
 use App\Models\LeadSheet;
+use App\Services\NotificationService;
 use Livewire\Component;
 use Livewire\Attributes\On;
 use Illuminate\Support\Facades\DB;
@@ -150,23 +151,16 @@ new class extends Component
 
                 $lead = Lead::create($leadData);
 
-                // Notify all sales users efficiently
+                // Notify all sales users and broadcast the update to their active clients.
                 $salesUsers = User::whereIn('role', ['sales', 'upsale', 'front_sale'])->get();
                 
                 if ($salesUsers->isNotEmpty()) {
-                    $notifications = $salesUsers->map(function ($user) use ($lead) {
-                        return [
-                            'user_id' => $user->id,
-                            'lead_id' => $lead->id,
-                            'type' => 'new_lead',
-                            'message' => "New lead '{$lead->name}' has been added by " . auth()->user()->name,
-                            'read' => false,
-                            'created_at' => now(),
-                            'updated_at' => now(),
-                        ];
-                    })->toArray();
-
-                    \App\Models\Notification::insert($notifications);
+                    NotificationService::createForUsers(
+                        $salesUsers,
+                        $lead,
+                        'new_lead',
+                        "New lead '{$lead->name}' has been added by " . auth()->user()->name
+                    );
                 }
 
                 DB::commit();
@@ -182,7 +176,7 @@ new class extends Component
                 
                 // Show success message
                 $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Lead created successfully! Sales team has been notified.']);
-                request()->session()->flash('message', 'Lead created successfully! Sales team has been notified.');
+                session()->flash('message', 'Lead created successfully! Sales team has been notified.');
 
             } catch (\Exception $e) {
                 DB::rollBack();

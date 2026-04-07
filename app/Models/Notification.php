@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Facades\Schema;
 
 class Notification extends Model
 {
@@ -13,10 +14,12 @@ class Notification extends Model
         'type',
         'message',
         'read',
+        'read_at',
     ];
 
     protected $casts = [
         'read' => 'boolean',
+        'read_at' => 'datetime',
     ];
 
     /**
@@ -32,7 +35,7 @@ class Notification extends Model
      */
     public function lead(): BelongsTo
     {
-        return $this->belongsTo(Lead::class);
+        return $this->belongsTo(Lead::class)->withTrashed();
     }
 
     /**
@@ -40,6 +43,24 @@ class Notification extends Model
      */
     public function markAsRead(): void
     {
-        $this->update(['read' => true]);
+        $data = ['read' => true];
+        if (Schema::hasColumn($this->getTable(), 'read_at')) {
+            $data['read_at'] = $this->read_at ?? now();
+        }
+        $this->forceFill($data)->save();
+    }
+
+    public function markAsUnread(): void
+    {
+        $data = ['read' => false];
+        if (Schema::hasColumn($this->getTable(), 'read_at')) {
+            $data['read_at'] = null;
+        }
+        $this->forceFill($data)->save();
+    }
+
+    public function isRead(): bool
+    {
+        return $this->read_at !== null || (bool) $this->read;
     }
 }

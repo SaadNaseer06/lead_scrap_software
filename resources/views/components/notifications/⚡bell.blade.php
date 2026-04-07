@@ -1,14 +1,19 @@
 <?php
 
 use App\Models\Notification;
+use App\Services\NotificationService;
 use Livewire\Component;
 use Livewire\Attributes\On;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 
 new class extends Component
 {
     public $unreadCount = 0;
     public $notifications = [];
     public $showDropdown = false;
+    public $isMarkingAll = false;
 
     public function mount()
     {
@@ -21,6 +26,9 @@ new class extends Component
     #[On('notification-created')]
     public function refreshNotifications()
     {
+        if ($this->isMarkingAll) {
+            return;
+        }
         $this->loadNotifications();
     }
 
@@ -33,23 +41,14 @@ new class extends Component
                 return;
             }
 
-            $query = Notification::where('user_id', auth()->id());
+            $query = $this->notificationQueryForUser();
 
-            // Apply team-based filtering for sales users
-            if (auth()->user()->isSalesTeam()) {
-                $userTeamIds = auth()->user()->teams()->pluck('teams.id')->toArray();
-                if (!empty($userTeamIds)) {
-                    $query->whereHas('lead.leadSheet', function ($q) use ($userTeamIds) {
-                        $q->whereHas('teams', fn ($t) => $t->whereIn('teams.id', $userTeamIds));
-                    });
-                } else {
-                    $query->whereRaw('1 = 0'); // no teams = no notifications
-                }
-            }
-            // Admin and Scrapper: no extra filter (see all their notifications)
-
-            // Count unread (use same filter as list; match DB 0/1 and boolean)
-            $this->unreadCount = (clone $query)->where('read', false)->count();
+            $this->unreadCount = (clone $query)
+                ->where(function ($builder) {
+                    $builder->where('read', false)
+                        ->orWhereNull('read');
+                })
+                ->count();
 
             $collection = $query
                 ->with('lead.leadSheet')
@@ -60,7 +59,7 @@ new class extends Component
             // Normalize to array with explicit boolean 'read' so the view always gets true/false
             $this->notifications = $collection->map(function ($n) {
                 $arr = $n->toArray();
-                $arr['read'] = (bool) ($arr['read'] ?? false);
+                $arr['read'] = $n->isRead();
                 return $arr;
             })->all();
         } catch (\Exception $e) {
@@ -82,24 +81,19 @@ new class extends Component
                 return;
             }
 
-            $notification = Notification::with('lead.leadSheet')->find($notificationId);
-            if ($notification && $notification->user_id === auth()->id()) {
-                // For sales users, verify the notification's lead belongs to their team's sheet
-                if (auth()->user()->isSalesTeam()) {
-                    $userTeamIds = auth()->user()->teams()->pluck('teams.id')->toArray();
-                    if (!empty($userTeamIds) && $notification->lead && $notification->lead->leadSheet) {
-                        $sheetTeamIds = $notification->lead->leadSheet->teams()->pluck('teams.id')->toArray();
-                        if (empty(array_intersect($userTeamIds, $sheetTeamIds))) {
-                            return; // Not authorized to mark this notification
-                        }
-                    } else {
-                        return; // No teams or no lead/sheet
-                    }
-                }
-                $notification->markAsRead();
-                $this->loadNotifications();
-                $this->dispatch('$refresh');
+            $notification = $this->notificationQueryForUser()
+                ->with('lead.leadSheet')
+                ->where('id', $notificationId)
+                ->first();
+
+            if (!$notification) {
+                return;
             }
+
+            $notification->markAsRead();
+            NotificationService::broadcastStateForUser($notification->user_id, $notification->id, 'read');
+            $this->loadNotifications();
+            $this->dispatch('$refresh');
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::error('Error marking notification as read: ' . $e->getMessage());
         }
@@ -112,23 +106,73 @@ new class extends Component
                 return;
             }
 
-            // Mark all unread notifications for this user (simple bulk update, no filter)
-            Notification::where('user_id', auth()->id())
-                ->where('read', false)
-                ->update(['read' => true]);
+            $this->isMarkingAll = true;
 
+            $update = ['read' => true];
+            if (Schema::hasColumn('notifications', 'read_at')) {
+                $update['read_at'] = now();
+            }
+
+            $affected = DB::table('notifications')->where('user_id', auth()->id())
+                ->update($update);
+
+            Log::info('markAllAsRead executed', [
+                'user_id' => auth()->id(),
+                'affected' => $affected,
+            ]);
+
+            // Keep UI immediately consistent even before next poll tick.
+            $this->unreadCount = 0;
+            $this->notifications = collect($this->notifications)
+                ->map(function ($notification) {
+                    $notification['read'] = true;
+                    if (Schema::hasColumn('notifications', 'read_at') && empty($notification['read_at'])) {
+                        $notification['read_at'] = now()->toDateTimeString();
+                    }
+                    return $notification;
+                })
+                ->all();
+
+            NotificationService::broadcastStateForUser(auth()->id(), null, 'all-read');
             $this->loadNotifications();
+            $this->dispatch('show-toast', [
+                'type' => 'success',
+                'message' => $affected > 0 ? 'All notifications marked as read.' : 'No unread notifications left.',
+            ]);
             $this->dispatch('$refresh');
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::error('Error marking all notifications as read: ' . $e->getMessage());
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to mark all notifications as read.']);
+        } finally {
+            $this->isMarkingAll = false;
         }
+    }
+
+    protected function notificationQueryForUser()
+    {
+        return Notification::where('user_id', auth()->id());
     }
 
     // No render method needed for anonymous components
 };
 ?>
 
-<div class="relative" x-data="{ open: false }" wire:poll.3s="$refresh">
+<div
+    class="relative"
+    x-data="{
+        open: false,
+        channel: null,
+        init() {
+            if (window.Echo?.private) {
+                this.channel = window.Echo.private('notifications.{{ auth()->id() }}');
+                this.channel
+                    .listen('.notification.state-changed', () => {
+                        $wire.refreshNotifications();
+                    });
+            }
+        }
+    }"
+>
     <button 
         @click="open = !open"
         type="button"
@@ -166,16 +210,15 @@ new class extends Component
                 Notifications
             </h3>
             @if($unreadCount > 0)
-                <button 
-                    type="button"
-                    @click.stop
-                    wire:click="markAllAsRead"
-                    wire:loading.attr="disabled"
-                    class="text-sm text-white/90 hover:text-white font-semibold px-3 py-1 bg-white/20 rounded-lg hover:bg-white/30 transition-all disabled:opacity-70"
-                >
-                    <span wire:loading.remove wire:target="markAllAsRead">Mark all read</span>
-                    <span wire:loading wire:target="markAllAsRead">Updating...</span>
-                </button>
+                <form method="POST" action="{{ route('notifications.mark-all-read') }}" @click.stop>
+                    @csrf
+                    <button 
+                        type="submit"
+                        class="text-sm text-white/90 hover:text-white font-semibold px-3 py-1 bg-white/20 rounded-lg hover:bg-white/30 transition-all"
+                    >
+                        Mark all read
+                    </button>
+                </form>
             @endif
         </div>
         
@@ -193,6 +236,11 @@ new class extends Component
                             <p class="text-xs text-gray-500 mt-1">
                                 {{ \Carbon\Carbon::parse($notification['created_at'])->diffForHumans() }}
                             </p>
+                            @if(!empty($notification['read_at']))
+                                <p class="text-[11px] text-emerald-600 mt-1">
+                                    Read {{ \Carbon\Carbon::parse($notification['read_at'])->diffForHumans() }}
+                                </p>
+                            @endif
                             @if(isset($notification['lead']))
                                 <a 
                                     href="{{ route('leads.show', $notification['lead']['id']) }}" 

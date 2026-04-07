@@ -4,10 +4,12 @@ use App\Models\Lead;
 use App\Models\LeadGroup;
 use App\Models\LeadSheet;
 use App\Models\User;
+use App\Services\NotificationService;
 use Livewire\Component;
 use Livewire\WithPagination;
 use Livewire\Attributes\On;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 new class extends Component
 {
@@ -21,6 +23,10 @@ new class extends Component
     public $viewMode = 'table'; 
     public $leadsData = [];
     public $pendingCreates = [];
+    public $editingGroupId = null;
+    public $editingGroupName = '';
+    public $addGroupFormKey = 1;
+    private $rowUniqueIds = [];
     protected $queryString = [
         'sheetFilter' => ['except' => ''],
         'groupFilter' => ['except' => ''],
@@ -44,12 +50,59 @@ new class extends Component
 
     public function updatedSheetFilter()
     {
-        $this->groupFilter = '';
+        if (!$this->sheetFilter) {
+            $this->groupFilter = '';
+            $this->editingGroupId = null;
+            $this->editingGroupName = '';
+            $this->pendingCreates = [];
+            $this->leadsData = [];
+            $this->loadSheetLeads();
+            return;
+        }
+
+        $firstGroupId = LeadGroup::where('lead_sheet_id', $this->sheetFilter)
+            ->orderBy('sort_order')
+            ->orderBy('name')
+            ->value('id');
+
+        $this->groupFilter = $firstGroupId ? (string) $firstGroupId : null;
+        $this->editingGroupId = null;
+        $this->editingGroupName = '';
+        $this->pendingCreates = [];
+        $this->leadsData = [];
+        $this->resetPage();
         $this->loadSheetLeads();
     }
 
     public function updatedGroupFilter()
     {
+        $this->pendingCreates = [];
+        $this->leadsData = [];
+        $this->editingGroupId = null;
+        $this->editingGroupName = '';
+        $this->resetPage();
+        $this->loadSheetLeads();
+    }
+
+    public function selectGroup($groupId)
+    {
+        if (!$this->sheetFilter) {
+            return;
+        }
+
+        $group = LeadGroup::where('id', $groupId)
+            ->where('lead_sheet_id', $this->sheetFilter)
+            ->first();
+
+        if (!$group) {
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Tab not found for this sheet.']);
+            return;
+        }
+
+        $this->groupFilter = (string) $groupId;
+        $this->pendingCreates = [];
+        $this->leadsData = [];
+        $this->resetPage();
         $this->loadSheetLeads();
     }
 
@@ -70,8 +123,9 @@ new class extends Component
         ]);
         $this->newGroupName = '';
         $this->groupFilter = (string) $group->id;
-        $this->loadSheetLeads();
         $this->resetValidation();
+        $this->addGroupFormKey++;
+        $this->loadSheetLeads();
         $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Tab added.']);
     }
 
@@ -84,11 +138,96 @@ new class extends Component
             $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Access denied.']);
             return;
         }
-        $group->leads()->update(['lead_group_id' => null]);
+        $group->leads()->delete();
         $group->delete();
         if ($this->groupFilter == $groupId) $this->groupFilter = '';
         $this->loadSheetLeads();
-        $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Tab removed. Leads in it are now ungrouped.']);
+        $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Tab removed. Leads in it were soft-deleted.']);
+    }
+
+
+    public function startEditingGroup($groupId)
+    {
+        $group = LeadGroup::find($groupId);
+        if (!$group) {
+            return;
+        }
+
+        $sheet = $group->leadSheet;
+        if (!$sheet || $sheet->created_by !== auth()->id()) {
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Access denied.']);
+            return;
+        }
+
+        $this->groupFilter = (string) $groupId;
+        $this->editingGroupId = $groupId;
+        $this->editingGroupName = $group->name;
+    }
+
+    public function cancelEditingGroup()
+    {
+        $this->editingGroupId = null;
+        $this->editingGroupName = '';
+    }
+
+    public function updateGroup()
+    {
+        if (!$this->editingGroupName || trim($this->editingGroupName) === '') {
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Tab name cannot be empty.']);
+            return;
+        }
+
+        $this->validate([
+            'editingGroupName' => 'required|string|max:255',
+        ], [
+            'editingGroupName.required' => 'Tab name is required.'
+        ]);
+
+        $group = LeadGroup::find($this->editingGroupId);
+        if (!$group) {
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Tab not found.']);
+            return;
+        }
+
+        $sheet = $group->leadSheet;
+        if (!$sheet || $sheet->created_by !== auth()->id()) {
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Access denied.']);
+            return;
+        }
+
+        $group->update(['name' => trim($this->editingGroupName)]);
+
+        $this->editingGroupId = null;
+        $this->editingGroupName = '';
+        $this->loadSheetLeads();
+        $this->resetValidation();
+        $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Tab renamed successfully.']);
+    }
+
+    public function deleteLeadRow($leadId)
+    {
+        if (!auth()->check() || !$this->canEditAcrossAllSheets()) {
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Access denied.']);
+            return;
+        }
+
+        $lead = Lead::where('id', $leadId)
+            ->where('created_by', auth()->id())
+            ->first();
+
+        if (!$lead) {
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Lead not found.']);
+            return;
+        }
+
+        $lead->delete();
+        $this->leadsData = array_values(array_filter(
+            $this->leadsData,
+            fn ($row) => ($row['id'] ?? null) !== $leadId
+        ));
+        $this->ensureEmptyRow();
+        $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Lead deleted successfully.']);
+        $this->dispatch('lead-updated');
     }
 
     #[On('lead-created')]
@@ -101,9 +240,33 @@ new class extends Component
     }
 
     #[On('sheet-created')]
-    public function refreshSheets()
+    public function refreshSheets($sheetId = null)
     {
         $this->resetPage();
+
+        if (!auth()->check() || !$sheetId) {
+            return;
+        }
+
+        $sheet = LeadSheet::where('id', $sheetId)
+            ->where('created_by', auth()->id())
+            ->first();
+
+        if (!$sheet) {
+            return;
+        }
+
+        $this->sheetFilter = (string) $sheetId;
+        $firstGroupId = LeadGroup::where('lead_sheet_id', $sheetId)
+            ->orderBy('sort_order')
+            ->orderBy('name')
+            ->value('id');
+        $this->groupFilter = $firstGroupId ? (string) $firstGroupId : null;
+        $this->pendingCreates = [];
+        $this->leadsData = [];
+        $this->editingGroupId = null;
+        $this->editingGroupName = '';
+        $this->loadSheetLeads();
     }
 
     public function refreshLeadsData()
@@ -112,19 +275,18 @@ new class extends Component
         // The render method will automatically fetch fresh data
     }
 
+    protected function canEditAcrossAllSheets(): bool
+    {
+        return auth()->check() && (auth()->user()->isScrapper() || auth()->user()->isFrontSale());
+    }
+
     public function updatedLeadsData($value, $key)
     {
         try {
             if (!auth()->check()) {
                 return;
             }
-            $sheet = $this->sheetFilter ? LeadSheet::find($this->sheetFilter) : null;
-            $canEdit = $sheet && $sheet->created_by === auth()->id() && (auth()->user()->isScrapper() || auth()->user()->isFrontSale());
-            if (!$canEdit) {
-                return;
-            }
-
-            if (!$this->sheetFilter) {
+            if (!$this->canEditAcrossAllSheets()) {
                 return;
             }
 
@@ -166,6 +328,14 @@ new class extends Component
                 return;
             }
 
+            if (!$this->sheetFilter && empty($row['id'])) {
+                return;
+            }
+
+            if ($this->sheetFilter && ($this->groupFilter === '' || $this->groupFilter === null) && empty($row['id'])) {
+                return;
+            }
+
             if (empty($row['id'])) {
                 if (empty($row['name'])) {
                     return;
@@ -181,7 +351,15 @@ new class extends Component
                     $existingLead = Lead::where('created_by', auth()->id())
                         ->where('lead_sheet_id', $this->sheetFilter)
                         ->where('name', $row['name'])
-                        ->whereDate('lead_date', now()->toDateString())
+                        ->whereDate('lead_date', now()->toDateString());
+
+                    if ($this->groupFilter !== '' && $this->groupFilter !== null) {
+                        $existingLead->where('lead_group_id', $this->groupFilter);
+                    } else {
+                        $existingLead->whereNull('lead_group_id');
+                    }
+
+                    $existingLead = $existingLead
                         ->orderBy('created_at', 'desc')
                         ->first();
 
@@ -209,23 +387,16 @@ new class extends Component
                         'web_link' => !empty($row['web_link']) ? trim($row['web_link']) : null,
                     ]);
 
-                    // Notify sales users efficiently
+                    // Notify sales users and broadcast the update to their active clients.
                     $salesUsers = User::whereIn('role', ['sales', 'upsale', 'front_sale'])->get();
                     
                     if ($salesUsers->isNotEmpty()) {
-                        $notifications = $salesUsers->map(function ($user) use ($lead) {
-                            return [
-                                'user_id' => $user->id,
-                                'lead_id' => $lead->id,
-                                'type' => 'new_lead',
-                                'message' => "New lead '{$lead->name}' has been added by " . auth()->user()->name,
-                                'read' => false,
-                                'created_at' => now(),
-                                'updated_at' => now(),
-                            ];
-                        })->toArray();
-
-                        \App\Models\Notification::insert($notifications);
+                        NotificationService::createForUsers(
+                            $salesUsers,
+                            $lead,
+                            'new_lead',
+                            "New lead '{$lead->name}' has been added by " . auth()->user()->name
+                        );
                     }
 
                     $this->leadsData[$index]['id'] = $lead->id;
@@ -257,8 +428,42 @@ new class extends Component
     public function loadSheetLeads()
     {
         try {
-            if (!auth()->check() || !$this->sheetFilter) {
+            if (!auth()->check()) {
                 $this->leadsData = [$this->emptyRow()];
+                return;
+            }
+
+            if (!$this->sheetFilter) {
+                if (!$this->canEditAcrossAllSheets()) {
+                    $this->leadsData = [];
+                    return;
+                }
+
+                $this->leadsData = Lead::with(['leadSheet', 'leadGroup'])
+                    ->where('created_by', auth()->id())
+                    ->orderBy('created_at', 'desc')
+                    ->get()
+                    ->map(function ($lead) {
+                        return [
+                            '_row_key' => 'lead-'.$lead->id,
+                            'id' => $lead->id,
+                            'sheet_name' => $lead->leadSheet?->name ?? '',
+                            'group_name' => $lead->leadGroup?->name ?? 'Ungrouped',
+                            'name' => $lead->name ?? '',
+                            'email' => $lead->email ?? '',
+                            'services' => $lead->services ?? '',
+                            'phone' => $lead->phone ?? '',
+                            'location' => $lead->location ?? '',
+                            'position' => $lead->position ?? '',
+                            'platform' => $lead->platform ?? '',
+                            'linkedin' => $lead->linkedin ?? '',
+                            'detail' => $lead->detail ?? '',
+                            'web_link' => $lead->web_link ?? '',
+                        ];
+                    })
+                    ->values()
+                    ->all();
+
                 return;
             }
 
@@ -274,15 +479,19 @@ new class extends Component
                 return;
             }
 
+            if ($this->groupFilter === '' || $this->groupFilter === null) {
+                $this->leadsData = [];
+                return;
+            }
+
             $leadsQuery = Lead::where('created_by', auth()->id())
                 ->where('lead_sheet_id', $this->sheetFilter);
-            if ($this->groupFilter) {
-                $leadsQuery->where('lead_group_id', $this->groupFilter);
-            }
+            $this->applySelectedGroupScope($leadsQuery);
             $this->leadsData = $leadsQuery->orderBy('created_at', 'desc')
                 ->get()
                 ->map(function ($lead) {
                     return [
+                        '_row_key' => 'lead-'.$lead->id,
                         'id' => $lead->id,
                         'name' => $lead->name ?? '',
                         'email' => $lead->email ?? '',
@@ -309,15 +518,33 @@ new class extends Component
 
     public function ensureEmptyRow()
     {
-        $last = end($this->leadsData);
-        if (!$last || !empty($last['id']) || array_filter($last)) {
+        // Don't add a new row if there's no data
+        if (empty($this->leadsData)) {
             $this->leadsData[] = $this->emptyRow();
+            return;
         }
+
+        $last = end($this->leadsData);
+        
+        // If last row is empty (no id and no name), don't add another empty row
+        if (!$last || (empty($last['id']) && empty($last['name']))) {
+            return;
+        }
+
+        // If last row has an ID (saved lead), always ensure there's an empty row after it
+        if (!empty($last['id'])) {
+            $this->leadsData[] = $this->emptyRow();
+            return;
+        }
+
+        // If last row has a name but no ID yet (being created), wait for creation to complete
+        // Don't add empty row until the lead is fully created and has an ID
     }
 
     public function emptyRow(): array
     {
         return [
+            '_row_key' => Str::uuid()->toString(),
             'id' => null,
             'name' => '',
             'email' => '',
@@ -332,6 +559,29 @@ new class extends Component
         ];
     }
 
+    public function displayValue($value, string $fallback = '—'): string
+    {
+        if ($value === null) {
+            return $fallback;
+        }
+
+        if (is_string($value) && trim($value) === '') {
+            return $fallback;
+        }
+
+        return (string) $value;
+    }
+
+    protected function applySelectedGroupScope($query): void
+    {
+        if ($this->groupFilter !== '' && $this->groupFilter !== null) {
+            $query->where('lead_group_id', $this->groupFilter);
+            return;
+        }
+
+        $query->whereRaw('1 = 0');
+    }
+
     public function mount()
     {
         // Set view mode from query parameter
@@ -339,11 +589,17 @@ new class extends Component
             $this->viewMode = request()->get('viewMode');
         }
         
-        // Load sheet leads for table view (scrapper or front_sale on their own sheet)
-        if (auth()->check() && $this->viewMode === 'table' && $this->sheetFilter) {
-            $sheet = LeadSheet::find($this->sheetFilter);
-            if ($sheet && $sheet->created_by === auth()->id() && (auth()->user()->isScrapper() || auth()->user()->isFrontSale()) && empty($this->leadsData)) {
+        if (auth()->check() && $this->viewMode === 'table' && empty($this->leadsData)) {
+            if (!$this->sheetFilter && $this->canEditAcrossAllSheets()) {
                 $this->loadSheetLeads();
+                return;
+            }
+
+            if ($this->sheetFilter) {
+                $sheet = LeadSheet::find($this->sheetFilter);
+                if ($sheet && $sheet->created_by === auth()->id() && $this->canEditAcrossAllSheets()) {
+                    $this->loadSheetLeads();
+                }
             }
         }
     }
@@ -351,15 +607,18 @@ new class extends Component
     public function render()
     {
         try {
-            // Load sheet leads for table view (scrapper or front_sale on their own sheet)
-            if (auth()->check() && $this->viewMode === 'table' && $this->sheetFilter) {
-                $currentSheet = LeadSheet::find($this->sheetFilter);
-                if ($currentSheet && $currentSheet->created_by === auth()->id() && (auth()->user()->isScrapper() || auth()->user()->isFrontSale()) && empty($this->leadsData)) {
+            if (auth()->check() && $this->viewMode === 'table' && empty($this->leadsData)) {
+                if (!$this->sheetFilter && $this->canEditAcrossAllSheets()) {
                     $this->loadSheetLeads();
+                } elseif ($this->sheetFilter) {
+                    $currentSheet = LeadSheet::find($this->sheetFilter);
+                    if ($currentSheet && $currentSheet->created_by === auth()->id() && $this->canEditAcrossAllSheets()) {
+                        $this->loadSheetLeads();
+                    }
                 }
             }
 
-            $query = Lead::with(['creator', 'opener', 'leadSheet'])
+            $query = Lead::with(['creator', 'opener', 'leadSheet', 'leadGroup'])
                 ->orderBy('created_at', 'desc');
 
             // Apply role-based filtering
@@ -405,8 +664,8 @@ new class extends Component
                 $query->where('lead_sheet_id', $this->sheetFilter);
             }
             // Apply group (tab) filter when viewing one sheet
-            if ($this->groupFilter) {
-                $query->where('lead_group_id', $this->groupFilter);
+            if ($this->sheetFilter) {
+                $this->applySelectedGroupScope($query);
             }
             if (auth()->check() && auth()->user()->isScrapper() && $this->viewMode === 'list' && !$this->sheetFilter) {
                 // For list view, show all leads if no sheet filter, but for table view, require sheet filter
@@ -516,6 +775,7 @@ new class extends Component
             @if(auth()->user()->isScrapper() || auth()->user()->isSalesTeam() || auth()->user()->isAdmin())
                 <select 
                     wire:model.live="sheetFilter" 
+                    wire:key="sheet-filter-{{ $sheetFilter ?: 'all' }}-{{ $sheets->count() }}"
                     class="px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
                 >
                     <option value="">All Sheets</option>
@@ -528,30 +788,54 @@ new class extends Component
         @error('sheetFilter') <span class="text-red-500 text-sm mt-2 block">{{ $message }}</span> @enderror
     </div>
 
-    <!-- Tabs (groups) when a sheet is selected: All, then each table/tab, add/remove if owner -->
+    <!-- Tabs (groups) when a sheet is selected -->
     @if($sheetFilter && (auth()->user()->isScrapper() || auth()->user()->isSalesTeam() || auth()->user()->isAdmin()))
         @php
             $currentSheet = $sheets->firstWhere('id', (int)$sheetFilter);
             $canEditTabs = $currentSheet && $currentSheet->created_by === auth()->id() && (auth()->user()->isScrapper() || auth()->user()->isFrontSale());
         @endphp
-        <div class="bg-white rounded-t-xl border border-gray-200 border-b-0 overflow-hidden mb-0">
+        <div class="bg-white rounded-t-xl border border-gray-200 border-b-0 overflow-hidden mb-0" wire:key="tabs-{{ $sheetFilter ?: 'none' }}-{{ $groups->count() }}">
             <div class="flex items-end border-b border-gray-200 bg-gray-50/80 overflow-x-auto">
-                <button type="button" wire:click="$set('groupFilter', '')"
-                    class="px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 -mb-px transition-colors {{ $groupFilter === '' ? 'bg-white text-blue-600 border-blue-600' : 'text-gray-600 border-transparent hover:bg-gray-100' }}">
-                    All
-                </button>
                 @foreach($groups as $group)
-                    <button type="button" wire:click="$set('groupFilter', '{{ $group->id }}')"
-                        class="group px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 -mb-px transition-colors flex items-center gap-1.5 {{ (string)$groupFilter === (string)$group->id ? 'bg-white text-blue-600 border-blue-600' : 'text-gray-600 border-transparent hover:bg-gray-100' }}">
-                        <span>{{ $group->name }}</span>
-                        @if($canEditTabs)
-                            <span class="opacity-0 group-hover:opacity-100 hover:opacity-100 text-gray-400 hover:text-red-600 cursor-pointer text-base leading-none select-none" onclick="event.stopPropagation(); if(confirm('Remove this tab? Leads stay but become ungrouped.')) { @this.call('removeGroup', {{ $group->id }}) }">×</span>
-                        @endif
-                    </button>
+                    @if($editingGroupId === $group->id)
+                        <form wire:submit.prevent="updateGroup" class="flex items-center px-4 py-2.5 border-b-2 -mb-px border-blue-600">
+                            <input 
+                                type="text" 
+                                wire:model="editingGroupName" 
+                                placeholder="Enter tab name..." 
+                                maxlength="255"
+                                wire:keydown.escape="cancelEditingGroup"
+                                wire:keydown.enter="updateGroup"
+                                autofocus
+                                class="px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-transparent w-40"
+                            >
+                            <button type="submit" class="ml-2 px-3 py-1 text-sm text-white bg-blue-600 hover:bg-blue-700 rounded font-medium">Save</button>
+                            <button type="button" wire:click="cancelEditingGroup" class="ml-1 px-3 py-1 text-sm text-gray-600 hover:bg-gray-200 rounded font-medium">Cancel</button>
+                        </form>
+                    @else
+                        <button type="button"
+                            wire:click="selectGroup({{ $group->id }})"
+                            @if($canEditTabs) wire:dblclick="startEditingGroup({{ $group->id }})" @endif
+                            class="group px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 -mb-px transition-colors flex items-center gap-1.5 {{ (string)$groupFilter === (string)$group->id ? 'bg-white text-blue-600 border-blue-600' : 'text-gray-600 border-transparent hover:bg-gray-100' }}"
+                            {!! $canEditTabs ? 'title="Double-click to rename"' : '' !!}
+                        >
+                            <span>{{ $group->name }}</span>
+                            @if($canEditTabs)
+                                <span class="opacity-0 group-hover:opacity-100 hover:opacity-100 text-gray-400 hover:text-red-600 cursor-pointer text-base leading-none select-none" onclick="event.stopPropagation(); if(confirm('Remove this tab? Leads in it will be deleted for users.')) { @this.call('removeGroup', {{ $group->id }}) }">×</span>
+                            @endif
+                        </button>
+                    @endif
                 @endforeach
                 @if($canEditTabs)
                     <form wire:submit.prevent="addGroup" class="flex items-center gap-1 ml-1 pb-1.5 border-b-2 border-transparent -mb-px">
-                        <input type="text" wire:model="newGroupName" placeholder="+ New tab" maxlength="255" class="w-24 px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500">
+                        <input 
+                            type="text" 
+                            wire:model.defer="newGroupName" 
+                            placeholder="+ New tab" 
+                            maxlength="255"
+                            wire:key="add-group-input-{{ $addGroupFormKey }}"
+                            class="w-24 px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500"
+                        >
                         <button type="submit" class="px-2 py-1.5 text-sm text-blue-600 hover:bg-blue-50 rounded font-medium">Add</button>
                     </form>
                     @error('newGroupName') <span class="text-red-500 text-xs ml-2">{{ $message }}</span> @enderror
@@ -564,8 +848,10 @@ new class extends Component
     @php
         $currentSheetForView = $sheetFilter ? $sheets->firstWhere('id', (int)$sheetFilter) : null;
         $canUseTableView = $currentSheetForView && $currentSheetForView->created_by === auth()->id() && (auth()->user()->isScrapper() || auth()->user()->isFrontSale());
+        $canViewAllLeads = !$sheetFilter && (auth()->user()->isScrapper() || auth()->user()->isSalesTeam() || auth()->user()->isAdmin());
+        $canEditAllSheetsTable = !$sheetFilter && (auth()->user()->isScrapper() || auth()->user()->isFrontSale());
     @endphp
-    @if($canUseTableView)
+    @if($canUseTableView || $canViewAllLeads)
         <div class="mb-4 flex justify-end">
             <div class="inline-flex rounded-lg border border-gray-300 bg-white shadow-sm">
                 @php
@@ -600,63 +886,183 @@ new class extends Component
         </div>
     @endif
 
-    <!-- Leads Table View (for Scrapper or Front Sale on their sheet when viewMode is 'table') -->
-    @if($canUseTableView && $viewMode === 'table')
+    <!-- Leads Table View -->
+    @if(($canUseTableView || $canEditAllSheetsTable) && $viewMode === 'table')
+        @if($sheetFilter && ($groupFilter === '' || $groupFilter === null))
+            <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 text-center text-gray-600">
+                Select or create a tab/group to start adding leads in this sheet.
+            </div>
+        @else
+            <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+                <div class="overflow-x-auto" wire:key="sheet-table-{{ $sheetFilter ?: 'none' }}-{{ $groupFilter !== '' ? $groupFilter : 'none' }}">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                @if(!$sheetFilter)
+                                    <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Sheet</th>
+                                    <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Group</th>
+                                @endif
+                                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Name</th>
+                                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Email</th>
+                                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Services</th>
+                                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Phone No</th>
+                                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Location</th>
+                                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Position</th>
+                                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Platform</th>
+                                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">LinkedIn</th>
+                                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Detail</th>
+                                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Web Link</th>
+                                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-gray-200">
+                            @forelse($leadsData as $index => $row)
+                                <tr
+                                    wire:key="lead-row-{{ $row['_row_key'] ?? Str::uuid() }}"
+                                    class="{{ empty($row['id']) ? 'bg-blue-50' : 'hover:bg-gray-50' }}"
+                                >
+                                    @if(!$sheetFilter)
+                                        <td class="px-4 py-2 text-sm text-gray-700 whitespace-nowrap">
+                                            {{ $this->displayValue($row['sheet_name'] ?? null) }}
+                                        </td>
+                                        <td class="px-4 py-2 text-sm text-gray-600 whitespace-nowrap">
+                                            {{ $this->displayValue($row['group_name'] ?? null, 'Ungrouped') }}
+                                        </td>
+                                    @endif
+                                    <td class="px-4 py-2">
+                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.name" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Name">
+                                    </td>
+                                    <td class="px-4 py-2">
+                                        <input type="email" wire:model.live.debounce.500ms="leadsData.{{ $index }}.email" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Email">
+                                    </td>
+                                    <td class="px-4 py-2">
+                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.services" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Services">
+                                    </td>
+                                    <td class="px-4 py-2">
+                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.phone" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Phone">
+                                    </td>
+                                    <td class="px-4 py-2">
+                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.location" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Location">
+                                    </td>
+                                    <td class="px-4 py-2">
+                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.position" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Position">
+                                    </td>
+                                    <td class="px-4 py-2">
+                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.platform" class="w-32 px-2 py-1 border border-gray-300 rounded" placeholder="Platform">
+                                    </td>
+                                    <td class="px-4 py-2">
+                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.linkedin" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="LinkedIn">
+                                    </td>
+                                    <td class="px-4 py-2">
+                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.detail" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Detail">
+                                    </td>
+                                    <td class="px-4 py-2">
+                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.web_link" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Web link">
+                                    </td>
+                                    <td class="px-4 py-2">
+                                        @if(!empty($row['id']))
+                                            <button
+                                                type="button"
+                                                class="px-3 py-1 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 rounded"
+                                                onclick="event.stopPropagation(); if(confirm('Delete this lead?')) { @this.call('deleteLeadRow', {{ $row['id'] }}) }"
+                                            >
+                                                Delete
+                                            </button>
+                                        @endif
+                                    </td>
+                                </tr>
+                            @empty
+                                <tr>
+                                    <td colspan="{{ $sheetFilter ? '11' : '13' }}" class="px-6 py-12 text-center text-gray-500">
+                                        No leads found.
+                                    </td>
+                                </tr>
+                            @endforelse
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        @endif
+    @elseif($canViewAllLeads && $viewMode === 'table')
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
             <div class="overflow-x-auto">
                 <table class="min-w-full divide-y divide-gray-200">
                     <thead class="bg-gray-50">
                         <tr>
-                            <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Name</th>
-                            <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Email</th>
-                            <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Services</th>
-                            <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Phone No</th>
-                            <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Location</th>
-                            <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Position</th>
-                            <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Platform</th>
-                            <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">LinkedIn</th>
-                            <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Detail</th>
-                            <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Web Link</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Lead</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Contact</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Sheet</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Group</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Services</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Status</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Created By</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Actions</th>
                         </tr>
                     </thead>
                     <tbody class="bg-white divide-y divide-gray-200">
-                        @forelse($leadsData as $index => $row)
-                            <tr class="{{ empty($row['id']) ? 'bg-blue-50' : 'hover:bg-gray-50' }}">
-                                <td class="px-4 py-2">
-                                    <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.name" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Name" @if(!$sheetFilter) disabled @endif>
+                        @forelse($leads as $lead)
+                            <tr class="hover:bg-gray-50 transition-colors">
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="flex items-center">
+                                        <div class="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold text-sm mr-3">
+                                            {{ strtoupper(substr($lead->name, 0, 1)) }}
+                                        </div>
+                                        <div>
+                                            <a href="{{ route('leads.show', $lead->id) }}" class="text-sm font-semibold text-gray-900 hover:text-blue-600 transition-colors">
+                                                {{ $lead->name }}
+                                            </a>
+                                            <div class="text-xs text-gray-500">{{ $lead->lead_date?->format('M d, Y') ?? '—' }}</div>
+                                        </div>
+                                    </div>
                                 </td>
-                                <td class="px-4 py-2">
-                                    <input type="email" wire:model.live.debounce.500ms="leadsData.{{ $index }}.email" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Email" @if(!$sheetFilter) disabled @endif>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="text-sm font-medium text-gray-900">{{ $this->displayValue($lead->email) }}</div>
+                                    <div class="text-xs text-gray-500">{{ $this->displayValue($lead->phone) }}</div>
                                 </td>
-                                <td class="px-4 py-2">
-                                    <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.services" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Services" @if(!$sheetFilter) disabled @endif>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                                    {{ $this->displayValue($lead->leadSheet?->name) }}
                                 </td>
-                                <td class="px-4 py-2">
-                                    <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.phone" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Phone" @if(!$sheetFilter) disabled @endif>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
+                                    {{ $lead->leadGroup->name ?? 'Ungrouped' }}
                                 </td>
-                                <td class="px-4 py-2">
-                                    <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.location" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Location" @if(!$sheetFilter) disabled @endif>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                                    {{ $this->displayValue($lead->services) }}
                                 </td>
-                                <td class="px-4 py-2">
-                                    <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.position" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Position" @if(!$sheetFilter) disabled @endif>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    @php
+                                    $statusColors = [
+                                        'wrong number' => 'bg-red-100 text-red-700',
+                                        'follow up' => 'bg-amber-100 text-amber-700',
+                                        'hired us' => 'bg-emerald-100 text-emerald-700',
+                                        'hired someone' => 'bg-purple-100 text-purple-700',
+                                        'no response' => 'bg-gray-100 text-gray-700',
+                                    ];
+                                @endphp
+                                <span class="px-3 py-1 text-xs font-semibold rounded-full {{ $statusColors[$lead->status] ?? 'bg-gray-100 text-gray-700' }}">
+                                    {{ ucwords($lead->status) }}
+                                </span>
                                 </td>
-                                <td class="px-4 py-2">
-                                    <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.platform" class="w-32 px-2 py-1 border border-gray-300 rounded" placeholder="Platform" @if(!$sheetFilter) disabled @endif>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="text-sm font-medium text-gray-900">{{ $lead->creator->name }}</div>
+                                    <div class="text-xs text-gray-500">{{ $lead->created_at->format('M d, Y') }}</div>
                                 </td>
-                                <td class="px-4 py-2">
-                                    <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.linkedin" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="LinkedIn" @if(!$sheetFilter) disabled @endif>
-                                </td>
-                                <td class="px-4 py-2">
-                                    <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.detail" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Detail" @if(!$sheetFilter) disabled @endif>
-                                </td>
-                                <td class="px-4 py-2">
-                                    <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.web_link" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Web link" @if(!$sheetFilter) disabled @endif>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <a href="{{ route('leads.show', $lead->id) }}" class="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors">
+                                        View
+                                        <svg class="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                                        </svg>
+                                    </a>
                                 </td>
                             </tr>
                         @empty
                             <tr>
-                                <td colspan="10" class="px-6 py-12 text-center text-gray-500">
-                                    Select a sheet to view and add leads.
+                                <td colspan="8" class="px-6 py-12 text-center">
+                                    <svg class="w-16 h-16 mx-auto text-gray-300 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
+                                    </svg>
+                                    <p class="text-gray-500 font-medium">No leads found</p>
+                                    <p class="text-gray-400 text-sm mt-1">Try adjusting your search or filters</p>
                                 </td>
                             </tr>
                         @endforelse
@@ -664,7 +1070,10 @@ new class extends Component
                 </table>
             </div>
         </div>
-    @elseif($canUseTableView && $viewMode === 'list')
+        <div class="mt-6">
+            {{ $leads->links() }}
+        </div>
+    @elseif(($canUseTableView || $canViewAllLeads) && $viewMode === 'list')
         <!-- List View for Scrapper (same as sales team view) -->
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
             <div class="overflow-x-auto">
@@ -673,7 +1082,8 @@ new class extends Component
                         <tr>
                             <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Lead</th>
                             <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Contact</th>
-                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Company</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Sheet</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Group</th>
                             <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Status</th>
                             <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Opened By</th>
                             <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Created By</th>
@@ -694,11 +1104,14 @@ new class extends Component
                                     </div>
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap">
-                                    <div class="text-sm font-medium text-gray-900">{{ $lead->email ?? 'N/A' }}</div>
-                                    <div class="text-xs text-gray-500">{{ $lead->phone ?? 'N/A' }}</div>
+                                    <div class="text-sm font-medium text-gray-900">{{ $this->displayValue($lead->email) }}</div>
+                                    <div class="text-xs text-gray-500">{{ $this->displayValue($lead->phone) }}</div>
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap">
-                                    <div class="text-sm font-medium text-gray-900">{{ $lead->company ?? 'N/A' }}</div>
+                                    <div class="text-sm font-medium text-gray-900">{{ $this->displayValue($lead->leadSheet?->name) }}</div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
+                                    {{ $lead->leadGroup->name ?? 'Ungrouped' }}
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap">
                                     @php
@@ -744,7 +1157,7 @@ new class extends Component
                             </tr>
                         @empty
                             <tr>
-                                <td colspan="7" class="px-6 py-12 text-center">
+                                <td colspan="8" class="px-6 py-12 text-center">
                                     <svg class="w-16 h-16 mx-auto text-gray-300 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
                                     </svg>
@@ -770,6 +1183,7 @@ new class extends Component
                             <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Lead</th>
                             <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Contact</th>
                             <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Company</th>
+                            <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Group</th>
                             <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Status</th>
                             <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Opened By</th>
                             <th class="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Created By</th>
@@ -790,11 +1204,14 @@ new class extends Component
                                     </div>
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap">
-                                    <div class="text-sm font-medium text-gray-900">{{ $lead->email ?? 'N/A' }}</div>
-                                    <div class="text-xs text-gray-500">{{ $lead->phone ?? 'N/A' }}</div>
+                                    <div class="text-sm font-medium text-gray-900">{{ $this->displayValue($lead->email) }}</div>
+                                    <div class="text-xs text-gray-500">{{ $this->displayValue($lead->phone) }}</div>
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap">
-                                    <div class="text-sm font-medium text-gray-900">{{ $lead->company ?? 'N/A' }}</div>
+                                    <div class="text-sm font-medium text-gray-900">{{ $this->displayValue($lead->company) }}</div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
+                                    {{ $lead->leadGroup->name ?? 'Ungrouped' }}
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap">
                                     @php
@@ -840,7 +1257,7 @@ new class extends Component
                             </tr>
                         @empty
                             <tr>
-                                <td colspan="7" class="px-6 py-12 text-center">
+                                <td colspan="8" class="px-6 py-12 text-center">
                                     <svg class="w-16 h-16 mx-auto text-gray-300 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
                                     </svg>
@@ -853,10 +1270,6 @@ new class extends Component
                 </table>
             </div>
         </div>
-    @endif
-
-    <!-- Pagination -->
-    @if(!auth()->user()->isScrapper())
         <div class="mt-6">
             {{ $leads->links() }}
         </div>
