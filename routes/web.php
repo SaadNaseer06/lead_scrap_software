@@ -4,8 +4,7 @@ use App\Models\Lead;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
-use App\Http\Controllers\Auth\LoginController;
-use App\Http\Controllers\UserController;
+use App\Http\Controllers\Auth\LoginController; 
 
 // Authentication Routes
 Route::get('/login', [LoginController::class, 'showLoginForm'])->name('login');
