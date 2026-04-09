@@ -1,6 +1,8 @@
 <?php
 
 use App\Models\Lead;
+use App\Models\User;
+use App\Services\NotificationService;
 use Livewire\Component;
 use Livewire\Attributes\On;
 use Illuminate\Support\Facades\Schema;
@@ -59,14 +61,15 @@ new class extends Component
                     
                     // Notify the creator that lead was opened
                     if ($this->lead->created_by !== auth()->id()) {
-                        \App\Models\Notification::create([
-                            'user_id' => $this->lead->created_by,
-                            'lead_id' => $this->lead->id,
-                            'type' => 'lead_opened',
-                            'message' => "Lead '{$this->lead->name}' has been opened by " . auth()->user()->name,
-                        ]);
-                        // Dispatch event to refresh notification bells
-                        $this->dispatch('notification-created');
+                        $creator = User::find($this->lead->created_by);
+                        if ($creator) {
+                            NotificationService::createForUsers(
+                                [$creator],
+                                $this->lead,
+                                'lead_opened',
+                                "Lead '{$this->lead->name}' has been opened by " . auth()->user()->name,
+                            );
+                        }
                     }
                     
                     // Dispatch events to refresh leads list and notifications

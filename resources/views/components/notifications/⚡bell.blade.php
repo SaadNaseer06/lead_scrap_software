@@ -159,16 +159,49 @@ new class extends Component
 
 <div
     class="relative"
+    wire:poll.2s="loadNotifications"
     x-data="{
         open: false,
         channel: null,
+        echoInitAttempts: 0,
+        echoInitTimer: null,
+        attachEchoListener() {
+            if (!window.Echo?.private) {
+                return false;
+            }
+
+            // Avoid duplicate subscriptions when Livewire re-renders the component.
+            if (this.channel) {
+                return true;
+            }
+
+            this.channel = window.Echo.private('notifications.{{ auth()->id() }}');
+            this.channel
+                .listen('.notification.state-changed', () => {
+                    $wire.refreshNotifications();
+                });
+
+            return true;
+        },
         init() {
-            if (window.Echo?.private) {
-                this.channel = window.Echo.private('notifications.{{ auth()->id() }}');
-                this.channel
-                    .listen('.notification.state-changed', () => {
-                        $wire.refreshNotifications();
-                    });
+            if (this.attachEchoListener()) {
+                return;
+            }
+
+            // Retry briefly in case Echo loads after this component initializes.
+            this.echoInitTimer = setInterval(() => {
+                this.echoInitAttempts++;
+
+                if (this.attachEchoListener() || this.echoInitAttempts >= 10) {
+                    clearInterval(this.echoInitTimer);
+                    this.echoInitTimer = null;
+                }
+            }, 1000);
+        },
+        destroy() {
+            if (this.echoInitTimer) {
+                clearInterval(this.echoInitTimer);
+                this.echoInitTimer = null;
             }
         }
     }"
