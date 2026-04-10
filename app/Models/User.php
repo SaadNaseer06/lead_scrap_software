@@ -102,7 +102,7 @@ class User extends Authenticatable
      */
     public function canCreateSheets(): bool
     {
-        return $this->isScrapper() || $this->isFrontSale();
+        return $this->isScrapper();
     }
 
     /**
@@ -110,7 +110,7 @@ class User extends Authenticatable
      */
     public function canCreateLeads(): bool
     {
-        return $this->isAdmin() || $this->isFrontSale();
+        return $this->isScrapper();
     }
 
     /**

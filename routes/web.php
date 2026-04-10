@@ -26,7 +26,7 @@ Route::middleware('auth')->group(function () {
         return view('leads.index');
     })->name('leads.index');
     
-    Route::middleware('role:admin,scrapper,front_sale')->group(function () {
+    Route::middleware('role:scrapper')->group(function () {
         Route::get('/leads/create', function () {
             return view('leads.create');
         })->name('leads.create');

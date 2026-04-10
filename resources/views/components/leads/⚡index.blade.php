@@ -5,15 +5,20 @@ use App\Models\LeadGroup;
 use App\Models\LeadSheet;
 use App\Models\User;
 use App\Services\NotificationService;
+use Carbon\Carbon;
 use Livewire\Component;
 use Livewire\WithPagination;
+use Livewire\WithFileUploads;
 use Livewire\Attributes\On;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use OpenSpout\Reader\CSV\Reader as CsvReader;
+use OpenSpout\Reader\ReaderInterface;
+use OpenSpout\Reader\XLSX\Reader as XlsxReader;
 
 new class extends Component
 {
-    use WithPagination;
+    use WithPagination, WithFileUploads;
 
     public $search = '';
     public $statusFilter = '';
@@ -21,6 +26,8 @@ new class extends Component
     public $groupFilter = '';
     public $newGroupName = '';
     public $viewMode = 'table'; 
+    public $importSheetId = '';
+    public $importFile;
     public $leadsData = [];
     public $pendingCreates = [];
     public $editingGroupId = null;
@@ -51,6 +58,9 @@ new class extends Component
     public function updatedSheetFilter()
     {
         if (!$this->sheetFilter) {
+            if (auth()->check() && auth()->user()->isScrapper()) {
+                $this->importSheetId = '';
+            }
             $this->groupFilter = '';
             $this->editingGroupId = null;
             $this->editingGroupName = '';
@@ -64,6 +74,10 @@ new class extends Component
             ->orderBy('sort_order')
             ->orderBy('name')
             ->value('id');
+
+        if (auth()->check() && auth()->user()->isScrapper()) {
+            $this->importSheetId = (string) $this->sheetFilter;
+        }
 
         $this->groupFilter = $firstGroupId ? (string) $firstGroupId : null;
         $this->editingGroupId = null;
@@ -275,9 +289,376 @@ new class extends Component
         // The render method will automatically fetch fresh data
     }
 
+    public function importLeadsFile()
+    {
+        $reader = null;
+        $readerOpened = false;
+
+        try {
+            if (!auth()->check() || !auth()->user()->isScrapper()) {
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Only scrapper can import leads.']);
+                return;
+            }
+
+            $this->validate([
+                'importSheetId' => 'required|integer|exists:lead_sheets,id',
+                'importFile' => 'required|file|mimes:csv,xlsx|max:10240',
+            ], [
+                'importSheetId.required' => 'Please select a sheet before importing.',
+                'importFile.required' => 'Please choose a CSV or XLSX file to import.',
+                'importFile.mimes' => 'Only CSV and XLSX files are supported.',
+                'importFile.max' => 'The import file may not be greater than 10MB.',
+            ]);
+
+            $sheet = LeadSheet::where('id', (int) $this->importSheetId)
+                ->where('created_by', auth()->id())
+                ->first();
+
+            if (!$sheet) {
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Selected sheet not found or access denied.']);
+                return;
+            }
+
+            $targetGroup = $this->resolveImportTargetGroup($sheet->id);
+
+            $extension = strtolower($this->importFile->getClientOriginalExtension() ?: pathinfo($this->importFile->getClientOriginalName(), PATHINFO_EXTENSION));
+            $reader = $this->createImportReader($extension);
+            $reader->open($this->importFile->getRealPath());
+            $readerOpened = true;
+
+            $headerMap = [];
+            $rowNumber = 0;
+            $imported = 0;
+            $skipped = 0;
+
+            foreach ($reader->getSheetIterator() as $sheetIterator) {
+                foreach ($sheetIterator->getRowIterator() as $row) {
+                    $rowNumber++;
+                    $rowValues = $row->toArray();
+
+                    if ($rowNumber === 1) {
+                        $headerMap = $this->buildImportHeaderMap($rowValues);
+
+                        if (!isset($headerMap['name'])) {
+                            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Import file must contain a Name column.']);
+                            return;
+                        }
+
+                        continue;
+                    }
+
+                    if ($this->isImportRowEmpty($rowValues)) {
+                        continue;
+                    }
+
+                    $payload = $this->buildLeadPayloadFromImportRow($rowValues, $headerMap);
+
+                    if (empty($payload['name'])) {
+                        $skipped++;
+                        continue;
+                    }
+
+                    Lead::create([
+                        'created_by' => auth()->id(),
+                        'lead_sheet_id' => $sheet->id,
+                        'lead_group_id' => $targetGroup->id,
+                        'status' => $payload['status'] ?? 'no response',
+                        'name' => $payload['name'],
+                        'email' => $payload['email'] ?? null,
+                        'phone' => $payload['phone'] ?? null,
+                        'company' => $payload['company'] ?? null,
+                        'services' => $payload['services'] ?? null,
+                        'location' => $payload['location'] ?? null,
+                        'position' => $payload['position'] ?? null,
+                        'platform' => $payload['platform'] ?? null,
+                        'linkedin' => $this->extractPrimarySocialLink($payload['social_links'] ?? null),
+                        'social_links' => $payload['social_links'] ?? null,
+                        'detail' => $payload['detail'] ?? null,
+                        'web_link' => $payload['web_link'] ?? null,
+                        'notes' => $payload['notes'] ?? null,
+                        'lead_date' => $payload['lead_date'] ?? now()->toDateString(),
+                    ]);
+
+                    $imported++;
+                }
+
+                // Import only the first worksheet for now.
+                break;
+            }
+
+            if ($imported === 0) {
+                $this->dispatch('show-toast', ['type' => 'warning', 'message' => 'No rows were imported. Please check your file data.']);
+                return;
+            }
+
+            $this->sheetFilter = (string) $sheet->id;
+            $this->groupFilter = (string) $targetGroup->id;
+            $this->importSheetId = (string) $sheet->id;
+            $this->importFile = null;
+            $this->resetValidation(['importFile', 'importSheetId']);
+
+            $this->pendingCreates = [];
+            $this->leadsData = [];
+            $this->loadSheetLeads();
+            $this->resetPage();
+            $this->dispatch('lead-created');
+
+            $message = "Imported {$imported} lead(s) successfully.";
+            if ($skipped > 0) {
+                $message .= " Skipped {$skipped} row(s) without a name.";
+            }
+
+            $this->dispatch('show-toast', ['type' => 'success', 'message' => $message]);
+        } catch (\Throwable $e) {
+            Log::error('Lead import failed', [
+                'user_id' => auth()->id(),
+                'error' => $e->getMessage(),
+            ]);
+
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Import failed. Please verify your file and try again.']);
+        } finally {
+            if ($readerOpened && $reader instanceof ReaderInterface) {
+                $reader->close();
+            }
+        }
+    }
+
+    protected function createImportReader(string $extension): ReaderInterface
+    {
+        return match (strtolower($extension)) {
+            'csv' => new CsvReader(),
+            'xlsx' => new XlsxReader(),
+            default => throw new \RuntimeException('Unsupported import file type.'),
+        };
+    }
+
+    protected function resolveImportTargetGroup(int $sheetId): LeadGroup
+    {
+        if ($this->sheetFilter && (int) $this->sheetFilter === $sheetId && $this->groupFilter) {
+            $selectedGroup = LeadGroup::where('id', (int) $this->groupFilter)
+                ->where('lead_sheet_id', $sheetId)
+                ->first();
+
+            if ($selectedGroup) {
+                return $selectedGroup;
+            }
+        }
+
+        $firstGroup = LeadGroup::where('lead_sheet_id', $sheetId)
+            ->orderBy('sort_order')
+            ->orderBy('name')
+            ->first();
+
+        if ($firstGroup) {
+            return $firstGroup;
+        }
+
+        $nextSortOrder = (LeadGroup::where('lead_sheet_id', $sheetId)->max('sort_order') ?? 0) + 1;
+
+        return LeadGroup::create([
+            'lead_sheet_id' => $sheetId,
+            'name' => 'Imported',
+            'sort_order' => $nextSortOrder,
+        ]);
+    }
+
+    protected function buildImportHeaderMap(array $headerRow): array
+    {
+        $map = [];
+
+        foreach ($headerRow as $index => $headerValue) {
+            $normalizedHeader = $this->normalizeImportHeader($headerValue);
+            $field = $this->mapImportHeaderToField($normalizedHeader);
+
+            if (!$field) {
+                continue;
+            }
+
+            if ($field === 'social_links') {
+                $map[$field] ??= [];
+                $map[$field][] = $index;
+                continue;
+            }
+
+            if (!isset($map[$field])) {
+                $map[$field] = $index;
+            }
+        }
+
+        return $map;
+    }
+
+    protected function mapImportHeaderToField(string $normalizedHeader): ?string
+    {
+        return match ($normalizedHeader) {
+            'name', 'fullname', 'leadname' => 'name',
+            'email', 'emailaddress' => 'email',
+            'phone', 'phoneno', 'phonenumber', 'mobile', 'mobileno' => 'phone',
+            'company' => 'company',
+            'services', 'service', 'job' => 'services',
+            'location', 'city', 'country', 'address' => 'location',
+            'position', 'designation', 'jobtitle', 'role' => 'position',
+            'platform', 'source', 'leadsource' => 'platform',
+            'linkedin', 'linkedinurl', 'linkedinprofile', 'links', 'link', 'sociallink', 'sociallinks', 'facebooklink', 'facebookurl', 'instagramlink', 'instagramurl', 'instalink', 'instaurl' => 'social_links',
+            'detail', 'details', 'description', 'budgetotherdetail', 'budgetotherdetails', 'otherdetail', 'otherdetails' => 'detail',
+            'weblink', 'websitelink', 'weburl', 'website', 'websiteurl', 'url' => 'web_link',
+            'notes', 'note', 'comment', 'comments' => 'notes',
+            'leaddate', 'date' => 'lead_date',
+            'status' => 'status',
+            default => null,
+        };
+    }
+
+    protected function normalizeImportHeader(mixed $header): string
+    {
+        $stringHeader = is_string($header) ? $header : (string) $header;
+        $stringHeader = strtolower(trim($stringHeader));
+
+        return preg_replace('/[^a-z0-9]+/', '', $stringHeader) ?? '';
+    }
+
+    protected function buildLeadPayloadFromImportRow(array $rowValues, array $headerMap): array
+    {
+        $payload = [];
+
+        foreach ($headerMap as $field => $index) {
+            if ($field === 'social_links') {
+                $payload[$field] = $this->normalizeImportSocialLinksValue($rowValues, is_array($index) ? $index : [$index]);
+                continue;
+            }
+
+            $rawValue = $rowValues[$index] ?? null;
+
+            if ($field === 'lead_date') {
+                $payload[$field] = $this->normalizeImportDateValue($rawValue);
+                continue;
+            }
+
+            if ($field === 'status') {
+                $payload[$field] = $this->normalizeImportStatusValue($rawValue);
+                continue;
+            }
+
+            $payload[$field] = $this->normalizeImportTextValue($rawValue);
+        }
+
+        $payload['name'] = trim((string) ($payload['name'] ?? ''));
+
+        return $payload;
+    }
+
+    protected function normalizeImportTextValue(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        if ($value instanceof \DateTimeInterface) {
+            return $value->format('Y-m-d');
+        }
+
+        $text = trim((string) $value);
+
+        return $text === '' ? null : $text;
+    }
+
+    protected function normalizeImportSocialLinksValue(array $rowValues, array $indexes): ?string
+    {
+        $links = [];
+
+        foreach ($indexes as $index) {
+            $value = $this->normalizeImportTextValue($rowValues[$index] ?? null);
+
+            if ($value === null) {
+                continue;
+            }
+
+            foreach ($this->splitSocialLinks($value) as $link) {
+                $links[] = $link;
+            }
+        }
+
+        $links = array_values(array_unique(array_filter($links)));
+
+        return empty($links) ? null : implode("\n", $links);
+    }
+
+    protected function normalizeImportDateValue(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        if ($value instanceof \DateTimeInterface) {
+            return $value->format('Y-m-d');
+        }
+
+        $text = trim((string) $value);
+        if ($text === '') {
+            return null;
+        }
+
+        try {
+            return Carbon::parse($text)->toDateString();
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    protected function normalizeImportStatusValue(mixed $value): ?string
+    {
+        $text = strtolower(trim((string) ($value ?? '')));
+        if ($text === '') {
+            return null;
+        }
+
+        $compact = preg_replace('/\s+/', '', $text) ?? $text;
+
+        return match ($compact) {
+            'wrongnumber' => 'wrong number',
+            'followup' => 'follow up',
+            'hiredus' => 'hired us',
+            'hiredsomeone' => 'hired someone',
+            'noresponse' => 'no response',
+            default => null,
+        };
+    }
+
+    protected function isImportRowEmpty(array $rowValues): bool
+    {
+        foreach ($rowValues as $value) {
+            if ($this->normalizeImportTextValue($value) !== null) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     protected function canEditAcrossAllSheets(): bool
     {
-        return auth()->check() && (auth()->user()->isScrapper() || auth()->user()->isFrontSale());
+        return auth()->check() && auth()->user()->isScrapper();
+    }
+
+    protected function splitSocialLinks(?string $value): array
+    {
+        if ($value === null) {
+            return [];
+        }
+
+        $parts = preg_split('/[\r\n,]+/', $value) ?: [];
+
+        return array_values(array_filter(array_map(static fn ($item) => trim($item), $parts)));
+    }
+
+    protected function extractPrimarySocialLink(?string $value): ?string
+    {
+        return $this->splitSocialLinks($value)[0] ?? null;
+    }
+
+    protected function resolveLeadSocialLinks(Lead $lead): string
+    {
+        return trim((string) ($lead->social_links ?: $lead->linkedin ?: ''));
     }
 
     public function updatedLeadsData($value, $key)
@@ -295,7 +676,7 @@ new class extends Component
                 return;
             }
 
-            $allowed = ['name', 'email', 'services', 'phone', 'location', 'position', 'platform', 'linkedin', 'detail', 'web_link'];
+            $allowed = ['name', 'email', 'services', 'phone', 'location', 'position', 'platform', 'social_links', 'detail', 'web_link'];
             if (!in_array($field, $allowed, true)) {
                 return;
             }
@@ -382,7 +763,8 @@ new class extends Component
                         'location' => !empty($row['location']) ? trim($row['location']) : null,
                         'position' => !empty($row['position']) ? trim($row['position']) : null,
                         'platform' => !empty($row['platform']) ? trim($row['platform']) : null,
-                        'linkedin' => !empty($row['linkedin']) ? trim($row['linkedin']) : null,
+                        'linkedin' => $this->extractPrimarySocialLink(!empty($row['social_links']) ? trim($row['social_links']) : null),
+                        'social_links' => !empty($row['social_links']) ? trim($row['social_links']) : null,
                         'detail' => !empty($row['detail']) ? trim($row['detail']) : null,
                         'web_link' => !empty($row['web_link']) ? trim($row['web_link']) : null,
                     ]);
@@ -413,9 +795,15 @@ new class extends Component
 
             // Update existing lead
             try {
+                $updateData = [$field => $value];
+
+                if ($field === 'social_links') {
+                    $updateData['linkedin'] = $this->extractPrimarySocialLink(is_string($value) ? $value : null);
+                }
+
                 Lead::where('id', $row['id'])
                     ->where('created_by', auth()->id())
-                    ->update([$field => $value]);
+                    ->update($updateData);
             } catch (\Exception $e) {
                 \Illuminate\Support\Facades\Log::error('Error updating lead: ' . $e->getMessage());
                 $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to update lead.']);
@@ -456,7 +844,7 @@ new class extends Component
                             'location' => $lead->location ?? '',
                             'position' => $lead->position ?? '',
                             'platform' => $lead->platform ?? '',
-                            'linkedin' => $lead->linkedin ?? '',
+                            'social_links' => $this->resolveLeadSocialLinks($lead),
                             'detail' => $lead->detail ?? '',
                             'web_link' => $lead->web_link ?? '',
                         ];
@@ -473,8 +861,8 @@ new class extends Component
                 $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Selected sheet not found or access denied.']);
                 return;
             }
-            // Scrapper or front_sale can load leads only for their own sheets
-            if (!auth()->user()->isScrapper() && !auth()->user()->isFrontSale()) {
+            // Only scrapper can load editable grid rows for own sheets.
+            if (!auth()->user()->isScrapper()) {
                 $this->leadsData = [$this->emptyRow()];
                 return;
             }
@@ -500,7 +888,7 @@ new class extends Component
                         'location' => $lead->location ?? '',
                         'position' => $lead->position ?? '',
                         'platform' => $lead->platform ?? '',
-                        'linkedin' => $lead->linkedin ?? '',
+                        'social_links' => $this->resolveLeadSocialLinks($lead),
                         'detail' => $lead->detail ?? '',
                         'web_link' => $lead->web_link ?? '',
                     ];
@@ -553,7 +941,7 @@ new class extends Component
             'location' => '',
             'position' => '',
             'platform' => '',
-            'linkedin' => '',
+            'social_links' => '',
             'detail' => '',
             'web_link' => '',
         ];
@@ -584,9 +972,31 @@ new class extends Component
 
     public function mount()
     {
+        $canUseTableMode = $this->canEditAcrossAllSheets();
+
         // Set view mode from query parameter
-        if (request()->has('viewMode') && in_array(request()->get('viewMode'), ['table', 'list'])) {
-            $this->viewMode = request()->get('viewMode');
+        if (request()->has('viewMode') && in_array(request()->get('viewMode'), ['table', 'list'], true)) {
+            $requestedViewMode = request()->get('viewMode');
+
+            if ($requestedViewMode === 'list' || ($requestedViewMode === 'table' && $canUseTableMode)) {
+                $this->viewMode = $requestedViewMode;
+            }
+        }
+
+        if (!$canUseTableMode) {
+            $this->viewMode = 'list';
+        }
+
+        if (auth()->check() && auth()->user()->isScrapper()) {
+            if (!empty($this->sheetFilter)) {
+                $this->importSheetId = (string) $this->sheetFilter;
+            } else {
+                $firstOwnedSheetId = LeadSheet::where('created_by', auth()->id())
+                    ->orderBy('created_at', 'desc')
+                    ->value('id');
+
+                $this->importSheetId = $firstOwnedSheetId ? (string) $firstOwnedSheetId : '';
+            }
         }
         
         if (auth()->check() && $this->viewMode === 'table' && empty($this->leadsData)) {
@@ -607,6 +1017,10 @@ new class extends Component
     public function render()
     {
         try {
+            if (!$this->canEditAcrossAllSheets() && $this->viewMode !== 'list') {
+                $this->viewMode = 'list';
+            }
+
             if (auth()->check() && $this->viewMode === 'table' && empty($this->leadsData)) {
                 if (!$this->sheetFilter && $this->canEditAcrossAllSheets()) {
                     $this->loadSheetLeads();
@@ -648,6 +1062,7 @@ new class extends Component
                       ->orWhere('location', 'like', $searchTerm)
                       ->orWhere('position', 'like', $searchTerm)
                       ->orWhere('platform', 'like', $searchTerm)
+                      ->orWhere('social_links', 'like', $searchTerm)
                       ->orWhere('linkedin', 'like', $searchTerm)
                       ->orWhere('detail', 'like', $searchTerm)
                       ->orWhere('web_link', 'like', $searchTerm);
@@ -740,6 +1155,58 @@ new class extends Component
             </div>
         @endif
 
+    @if(auth()->user()->isScrapper())
+        <div class="mb-6 bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+            <div class="flex items-start justify-between gap-3 mb-4">
+                <div>
+                    <h2 class="text-lg font-semibold text-gray-900">Import Leads (CSV/XLSX)</h2>
+                    <p class="text-sm text-gray-600 mt-1">Upload a file to import leads into a selected sheet.</p>
+                </div>
+            </div>
+
+            <form wire:submit.prevent="importLeadsFile" class="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+                <div>
+                    <label for="import_sheet_id" class="block text-sm font-semibold text-gray-700 mb-2">Target Sheet</label>
+                    <select
+                        id="import_sheet_id"
+                        wire:model="importSheetId"
+                        class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white @error('importSheetId') border-red-500 @enderror"
+                    >
+                        <option value="">Select a sheet...</option>
+                        @foreach($sheets as $sheet)
+                            <option value="{{ $sheet->id }}">{{ $sheet->name }}</option>
+                        @endforeach
+                    </select>
+                    @error('importSheetId') <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> @enderror
+                </div>
+
+                <div>
+                    <label for="import_file" class="block text-sm font-semibold text-gray-700 mb-2">CSV or XLSX File</label>
+                    <input
+                        id="import_file"
+                        type="file"
+                        wire:model="importFile"
+                        accept=".csv,.xlsx"
+                        class="w-full px-3 py-2.5 border border-gray-300 rounded-lg bg-white text-sm file:mr-3 file:px-3 file:py-1.5 file:border-0 file:rounded-md file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 @error('importFile') border-red-500 @enderror"
+                    >
+                    @error('importFile') <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> @enderror
+                </div>
+
+                <div>
+                    <button
+                        type="submit"
+                        wire:loading.attr="disabled"
+                        wire:target="importLeadsFile,importFile"
+                        class="w-full px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        <span wire:loading.remove wire:target="importLeadsFile">Import Leads</span>
+                        <span wire:loading wire:target="importLeadsFile">Importing...</span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    @endif
+
     <!-- Create Lead Modal -->
     @if(auth()->user()->canCreateLeads())
         <livewire:leads.create />
@@ -792,7 +1259,7 @@ new class extends Component
     @if($sheetFilter && (auth()->user()->isScrapper() || auth()->user()->isSalesTeam() || auth()->user()->isAdmin()))
         @php
             $currentSheet = $sheets->firstWhere('id', (int)$sheetFilter);
-            $canEditTabs = $currentSheet && $currentSheet->created_by === auth()->id() && (auth()->user()->isScrapper() || auth()->user()->isFrontSale());
+            $canEditTabs = $currentSheet && $currentSheet->created_by === auth()->id() && auth()->user()->isScrapper();
         @endphp
         <div class="bg-white rounded-t-xl border border-gray-200 border-b-0 overflow-hidden mb-0" wire:key="tabs-{{ $sheetFilter ?: 'none' }}-{{ $groups->count() }}">
             <div class="flex items-end border-b border-gray-200 bg-gray-50/80 overflow-x-auto">
@@ -847,11 +1314,12 @@ new class extends Component
     <!-- View Mode Toggle for Scrapper and Front Sale (for their own sheets) -->
     @php
         $currentSheetForView = $sheetFilter ? $sheets->firstWhere('id', (int)$sheetFilter) : null;
-        $canUseTableView = $currentSheetForView && $currentSheetForView->created_by === auth()->id() && (auth()->user()->isScrapper() || auth()->user()->isFrontSale());
+        $canEditInlineLeads = auth()->user()->isScrapper();
+        $canUseTableView = $currentSheetForView && $currentSheetForView->created_by === auth()->id() && auth()->user()->isScrapper();
         $canViewAllLeads = !$sheetFilter && (auth()->user()->isScrapper() || auth()->user()->isSalesTeam() || auth()->user()->isAdmin());
-        $canEditAllSheetsTable = !$sheetFilter && (auth()->user()->isScrapper() || auth()->user()->isFrontSale());
+        $canEditAllSheetsTable = !$sheetFilter && auth()->user()->isScrapper();
     @endphp
-    @if($canUseTableView || $canViewAllLeads)
+    @if($canEditInlineLeads && ($canUseTableView || $canViewAllLeads))
         <div class="mb-4 flex justify-end">
             <div class="inline-flex rounded-lg border border-gray-300 bg-white shadow-sm">
                 @php
@@ -909,8 +1377,8 @@ new class extends Component
                                 <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Location</th>
                                 <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Position</th>
                                 <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Platform</th>
-                                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">LinkedIn</th>
-                                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Detail</th>
+                                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Social Links</th>
+                                <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Details</th>
                                 <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Web Link</th>
                                 <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Actions</th>
                             </tr>
@@ -951,10 +1419,10 @@ new class extends Component
                                         <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.platform" class="w-32 px-2 py-1 border border-gray-300 rounded" placeholder="Platform">
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.linkedin" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="LinkedIn">
+                                        <textarea wire:model.live.debounce.500ms="leadsData.{{ $index }}.social_links" class="w-56 px-2 py-1 border border-gray-300 rounded" rows="2" placeholder="Social links (LinkedIn, Facebook, Instagram)"></textarea>
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.detail" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Detail">
+                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.detail" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Details">
                                     </td>
                                     <td class="px-4 py-2">
                                         <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.web_link" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Web link">
@@ -983,7 +1451,7 @@ new class extends Component
                 </div>
             </div>
         @endif
-    @elseif($canViewAllLeads && $viewMode === 'table')
+    @elseif($canEditInlineLeads && $canViewAllLeads && $viewMode === 'table')
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
             <div class="overflow-x-auto">
                 <table class="min-w-full divide-y divide-gray-200">

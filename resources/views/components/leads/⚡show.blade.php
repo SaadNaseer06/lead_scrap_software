@@ -108,6 +108,18 @@ new class extends Component
         $this->loadLead();
     }
 
+    public function socialLinks(): array
+    {
+        $value = trim((string) ($this->lead->social_links ?? $this->lead->linkedin ?? ''));
+        if ($value === '') {
+            return [];
+        }
+
+        $parts = preg_split('/[\r\n,]+/', $value) ?: [];
+
+        return array_values(array_filter(array_map(static fn ($item) => trim($item), $parts)));
+    }
+
     public function updateStatus($status)
     {
         try {
@@ -356,9 +368,13 @@ new class extends Component
                     <p class="text-base font-medium text-gray-900">{{ $lead->platform ?? 'N/A' }}</p>
                 </div>
                 <div class="bg-gray-50 p-4 rounded-lg">
-                    <p class="text-xs font-semibold text-gray-600 uppercase mb-2">LinkedIn</p>
-                    @if($lead->linkedin)
-                        <a href="{{ $lead->linkedin }}" target="_blank" class="text-blue-600 hover:underline">Open link</a>
+                    <p class="text-xs font-semibold text-gray-600 uppercase mb-2">Social Links</p>
+                    @if($this->socialLinks())
+                        <div class="space-y-1">
+                            @foreach($this->socialLinks() as $socialLink)
+                                <a href="{{ $socialLink }}" target="_blank" class="block text-blue-600 hover:underline break-all">{{ $socialLink }}</a>
+                            @endforeach
+                        </div>
                     @else
                         <p class="text-base font-medium text-gray-900">N/A</p>
                     @endif
@@ -372,7 +388,7 @@ new class extends Component
                     @endif
                 </div>
                 <div class="bg-gray-50 p-4 rounded-lg md:col-span-2">
-                    <p class="text-xs font-semibold text-gray-600 uppercase mb-2">Business Description</p>
+                    <p class="text-xs font-semibold text-gray-600 uppercase mb-2">Details</p>
                     <p class="text-base font-medium text-gray-900">{{ $lead->detail ?? 'N/A' }}</p>
                 </div>
             </div>

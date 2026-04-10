@@ -113,7 +113,7 @@ new class extends Component
             }
 
             $rules = $this->rules;
-            if (auth()->user()->isScrapper() || auth()->user()->isFrontSale()) {
+            if (auth()->user()->isScrapper()) {
                 $rules['lead_sheet_id'] = 'required|exists:lead_sheets,id';
             }
             
@@ -268,7 +268,7 @@ new class extends Component
                             <div>
                                 <label for="lead_sheet_id" class="block text-sm font-semibold text-gray-700 mb-2">
                                     Sheet
-                                    @if(auth()->user()->isScrapper() || auth()->user()->isFrontSale())
+                                    @if(auth()->user()->isScrapper())
                                         <span class="text-red-500">*</span>
                                     @endif
                                 </label>
