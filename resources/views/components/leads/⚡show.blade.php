@@ -110,14 +110,43 @@ new class extends Component
 
     public function socialLinks(): array
     {
-        $value = trim((string) ($this->lead->social_links ?? $this->lead->linkedin ?? ''));
+        if (!$this->lead) {
+            return [];
+        }
+
+        return $this->splitSocialLinks($this->lead->social_links ?? $this->lead->linkedin ?? '');
+    }
+
+    protected function splitSocialLinks(?string $value): array
+    {
+        if ($value === null) {
+            return [];
+        }
+
+        $value = trim($value);
         if ($value === '') {
             return [];
         }
 
-        $parts = preg_split('/[\r\n,]+/', $value) ?: [];
+        $parts = preg_split('/[\r\n,;|]+/', $value) ?: [];
 
-        return array_values(array_filter(array_map(static fn ($item) => trim($item), $parts)));
+        if (count($parts) <= 1) {
+            preg_match_all('/(?:https?:\/\/|www\.)[^\s,;|]+|[a-z0-9.-]+\.[a-z]{2,}[^\s,;|]*/i', $value, $matches);
+            if (!empty($matches[0])) {
+                $parts = $matches[0];
+            }
+        }
+
+        return array_values(array_unique(array_filter(array_map(static fn ($item) => trim($item), $parts))));
+    }
+
+    public function socialLinkHref(string $socialLink): string
+    {
+        if (preg_match('/^[a-z][a-z0-9+\-.]*:\/\//i', $socialLink)) {
+            return $socialLink;
+        }
+
+        return 'https://' . ltrim($socialLink, '/');
     }
 
     public function updateStatus($status)
@@ -372,7 +401,7 @@ new class extends Component
                     @if($this->socialLinks())
                         <div class="space-y-1">
                             @foreach($this->socialLinks() as $socialLink)
-                                <a href="{{ $socialLink }}" target="_blank" class="block text-blue-600 hover:underline break-all">{{ $socialLink }}</a>
+                                <a href="{{ $this->socialLinkHref($socialLink) }}" target="_blank" rel="noopener noreferrer" class="block text-blue-600 hover:underline break-all">{{ $socialLink }}</a>
                             @endforeach
                         </div>
                     @else

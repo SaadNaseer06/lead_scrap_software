@@ -578,9 +578,7 @@ new class extends Component
             }
         }
 
-        $links = array_values(array_unique(array_filter($links)));
-
-        return empty($links) ? null : implode("\n", $links);
+        return $this->normalizeSocialLinks(implode("\n", $links));
     }
 
     protected function normalizeImportDateValue(mixed $value): ?string
@@ -646,9 +644,28 @@ new class extends Component
             return [];
         }
 
-        $parts = preg_split('/[\r\n,]+/', $value) ?: [];
+        $value = trim($value);
+        if ($value === '') {
+            return [];
+        }
 
-        return array_values(array_filter(array_map(static fn ($item) => trim($item), $parts)));
+        $parts = preg_split('/[\r\n,;|]+/', $value) ?: [];
+
+        if (count($parts) <= 1) {
+            preg_match_all('/(?:https?:\/\/|www\.)[^\s,;|]+|[a-z0-9.-]+\.[a-z]{2,}[^\s,;|]*/i', $value, $matches);
+            if (!empty($matches[0])) {
+                $parts = $matches[0];
+            }
+        }
+
+        return array_values(array_unique(array_filter(array_map(static fn ($item) => trim($item), $parts))));
+    }
+
+    protected function normalizeSocialLinks(?string $value): ?string
+    {
+        $links = $this->splitSocialLinks($value);
+
+        return empty($links) ? null : implode("\n", $links);
     }
 
     protected function extractPrimarySocialLink(?string $value): ?string
@@ -658,7 +675,7 @@ new class extends Component
 
     protected function resolveLeadSocialLinks(Lead $lead): string
     {
-        return trim((string) ($lead->social_links ?: $lead->linkedin ?: ''));
+        return $this->normalizeSocialLinks($lead->social_links ?: $lead->linkedin ?: '') ?? '';
     }
 
     public function updatedLeadsData($value, $key)
@@ -751,6 +768,7 @@ new class extends Component
                     }
 
                     $lead = Lead::create([
+                        'social_links' => $normalizedSocialLinks = $this->normalizeSocialLinks(!empty($row['social_links']) ? trim($row['social_links']) : null),
                         'created_by' => auth()->id(),
                         'lead_sheet_id' => $this->sheetFilter,
                         'lead_group_id' => $this->groupFilter ?: null,
@@ -763,8 +781,7 @@ new class extends Component
                         'location' => !empty($row['location']) ? trim($row['location']) : null,
                         'position' => !empty($row['position']) ? trim($row['position']) : null,
                         'platform' => !empty($row['platform']) ? trim($row['platform']) : null,
-                        'linkedin' => $this->extractPrimarySocialLink(!empty($row['social_links']) ? trim($row['social_links']) : null),
-                        'social_links' => !empty($row['social_links']) ? trim($row['social_links']) : null,
+                        'linkedin' => $this->extractPrimarySocialLink($normalizedSocialLinks),
                         'detail' => !empty($row['detail']) ? trim($row['detail']) : null,
                         'web_link' => !empty($row['web_link']) ? trim($row['web_link']) : null,
                     ]);
@@ -798,7 +815,10 @@ new class extends Component
                 $updateData = [$field => $value];
 
                 if ($field === 'social_links') {
-                    $updateData['linkedin'] = $this->extractPrimarySocialLink(is_string($value) ? $value : null);
+                    $normalizedSocialLinks = $this->normalizeSocialLinks(is_string($value) ? $value : null);
+                    $updateData['social_links'] = $normalizedSocialLinks;
+                    $updateData['linkedin'] = $this->extractPrimarySocialLink($normalizedSocialLinks);
+                    $this->leadsData[$index]['social_links'] = $normalizedSocialLinks ?? '';
                 }
 
                 Lead::where('id', $row['id'])
