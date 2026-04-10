@@ -737,6 +737,7 @@ new class extends Component
             $this->loadSheetLeads();
             $this->resetPage();
             $this->dispatch('lead-created');
+            $this->dispatch('close-import-modal');
 
             $message = "Imported {$imported} lead(s) successfully.";
             if ($skipped > 0) {
@@ -1474,7 +1475,13 @@ new class extends Component
 };
 ?>
 
-<div class="max-w-9xl mx-auto px-4 sm:px-6 lg:px-8 py-6" wire:poll.5s="refreshLeadsData">
+<div
+    class="max-w-9xl mx-auto px-4 sm:px-6 lg:px-8 py-6"
+    wire:poll.5s="refreshLeadsData"
+    x-data="{ importModalOpen: false }"
+    x-on:close-import-modal.window="importModalOpen = false"
+    x-on:keydown.escape.window="importModalOpen = false"
+>
     <!-- Header -->
     <div class="mb-6">
         <div class="flex justify-between items-center">
@@ -1483,11 +1490,23 @@ new class extends Component
                 <p class="text-gray-600 mt-1">Manage and track all your leads</p>
             </div>
             <div class="flex items-center gap-3">
+                @if(auth()->user()->isScrapper())
+                    <button
+                        type="button"
+                        x-on:click="importModalOpen = true"
+                        class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg font-semibold shadow-sm hover:shadow-md transition-all flex items-center space-x-2"
+                    >
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v12m0-12l-4 4m4-4l4 4M4 20h16"></path>
+                        </svg>
+                        <span>Import Leads</span>
+                    </button>
+                @endif
                 <button 
                     wire:click="exportLeads"
                     wire:loading.attr="disabled"
                     wire:target="exportLeads"
-                    class="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-lg font-semibold shadow-sm hover:shadow-md transition-all flex items-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                    class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg font-semibold shadow-sm hover:shadow-md transition-all flex items-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 16v-8m0 8l-3-3m3 3l3-3M5 20h14"></path>
@@ -1495,17 +1514,6 @@ new class extends Component
                     <span wire:loading.remove wire:target="exportLeads">Export Leads</span>
                     <span wire:loading wire:target="exportLeads">Exporting...</span>
                 </button>
-                @if(auth()->user()->canCreateLeads())
-                    <button 
-                        wire:click="$dispatch('open-create-modal')"
-                        class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg font-semibold shadow-sm hover:shadow-md transition-all flex items-center space-x-2"
-                    >
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
-                        </svg>
-                        <span>Add New Lead</span>
-                    </button>
-                @endif
             </div>
         </div>
     </div>
@@ -1517,61 +1525,103 @@ new class extends Component
             </div>
         @endif
 
-    @if(auth()->user()->isScrapper())
-        <div class="mb-6 bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-            <div class="flex items-start justify-between gap-3 mb-4">
-                <div>
-                    <h2 class="text-lg font-semibold text-gray-900">Import Leads (CSV/XLSX)</h2>
-                    <p class="text-sm text-gray-600 mt-1">Upload a file to import leads into a selected sheet.</p>
-                </div>
-            </div>
-
-            <form wire:submit.prevent="importLeadsFile" class="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
-                <div>
-                    <label for="import_sheet_id" class="block text-sm font-semibold text-gray-700 mb-2">Target Sheet</label>
-                    <select
-                        id="import_sheet_id"
-                        wire:model="importSheetId"
-                        class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white @error('importSheetId') border-red-500 @enderror"
-                    >
-                        <option value="">Select a sheet...</option>
-                        @foreach($sheets as $sheet)
-                            <option value="{{ $sheet->id }}">{{ $sheet->name }}</option>
-                        @endforeach
-                    </select>
-                    @error('importSheetId') <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> @enderror
-                </div>
-
-                <div>
-                    <label for="import_file" class="block text-sm font-semibold text-gray-700 mb-2">CSV or XLSX File</label>
-                    <input
-                        id="import_file"
-                        type="file"
-                        wire:model="importFile"
-                        accept=".csv,.xlsx"
-                        class="w-full px-3 py-2.5 border border-gray-300 rounded-lg bg-white text-sm file:mr-3 file:px-3 file:py-1.5 file:border-0 file:rounded-md file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 @error('importFile') border-red-500 @enderror"
-                    >
-                    @error('importFile') <span class="text-red-500 text-sm mt-1 block">{{ $message }}</span> @enderror
-                </div>
-
-                <div>
-                    <button
-                        type="submit"
-                        wire:loading.attr="disabled"
-                        wire:target="importLeadsFile,importFile"
-                        class="w-full px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                        <span wire:loading.remove wire:target="importLeadsFile">Import Leads</span>
-                        <span wire:loading wire:target="importLeadsFile">Importing...</span>
-                    </button>
-                </div>
-            </form>
-        </div>
-    @endif
-
     <!-- Create Lead Modal -->
     @if(auth()->user()->canCreateLeads())
         <livewire:leads.create />
+    @endif
+
+    @if(auth()->user()->isScrapper())
+        <div
+            x-cloak
+            x-show="importModalOpen"
+            class="fixed inset-0 z-50 flex items-center justify-center px-4 py-6"
+            style="display: none;"
+        >
+            <div class="absolute inset-0 bg-slate-900/55 backdrop-blur-sm" x-on:click="importModalOpen = false"></div>
+
+            <div
+                x-show="importModalOpen"
+                x-transition:enter="transition ease-out duration-200"
+                x-transition:enter-start="opacity-0 translate-y-3 scale-95"
+                x-transition:enter-end="opacity-100 translate-y-0 scale-100"
+                x-transition:leave="transition ease-in duration-150"
+                x-transition:leave-start="opacity-100 translate-y-0 scale-100"
+                x-transition:leave-end="opacity-0 translate-y-3 scale-95"
+                class="relative w-full max-w-2xl rounded-2xl bg-white shadow-2xl border border-slate-200 overflow-hidden"
+            >
+                <div class="bg-gradient-to-r from-blue-600 to-blue-700 px-6 py-5 text-white">
+                    <div class="flex items-start justify-between gap-4">
+                        <div>
+                            <h2 class="text-xl font-semibold">Import Leads</h2>
+                            <p class="mt-1 text-sm text-blue-100">Upload a CSV or XLSX file and choose the target sheet.</p>
+                        </div>
+                        <button
+                            type="button"
+                            x-on:click="importModalOpen = false"
+                            class="inline-flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20"
+                        >
+                            <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <form wire:submit.prevent="importLeadsFile" class="p-6 space-y-5">
+                    <div class="grid grid-cols-1 gap-5 md:grid-cols-2">
+                        <div>
+                            <label for="import_sheet_id" class="block text-sm font-semibold text-slate-700 mb-2">Target Sheet</label>
+                            <select
+                                id="import_sheet_id"
+                                wire:model="importSheetId"
+                                class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white @error('importSheetId') border-red-500 @enderror"
+                            >
+                                <option value="">Select a sheet...</option>
+                                @foreach($sheets as $sheet)
+                                    <option value="{{ $sheet->id }}">{{ $sheet->name }}</option>
+                                @endforeach
+                            </select>
+                            @error('importSheetId') <span class="text-red-500 text-sm mt-2 block">{{ $message }}</span> @enderror
+                        </div>
+
+                        <div>
+                            <label for="import_file" class="block text-sm font-semibold text-slate-700 mb-2">CSV or XLSX File</label>
+                            <input
+                                id="import_file"
+                                type="file"
+                                wire:model="importFile"
+                                accept=".csv,.xlsx"
+                                class="w-full px-3 py-3 border border-slate-300 rounded-xl bg-white text-sm file:mr-3 file:px-3 file:py-1.5 file:border-0 file:rounded-md file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 @error('importFile') border-red-500 @enderror"
+                            >
+                            @error('importFile') <span class="text-red-500 text-sm mt-2 block">{{ $message }}</span> @enderror
+                        </div>
+                    </div>
+
+                    <div class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                        Social links, website links, location, and details from your spreadsheet will be mapped during import.
+                    </div>
+
+                    <div class="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+                        <button
+                            type="button"
+                            x-on:click="importModalOpen = false"
+                            class="px-5 py-2.5 rounded-xl border border-slate-300 text-slate-700 font-semibold hover:bg-slate-50 transition"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            type="submit"
+                            wire:loading.attr="disabled"
+                            wire:target="importLeadsFile,importFile"
+                            class="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            <span wire:loading.remove wire:target="importLeadsFile">Import Leads</span>
+                            <span wire:loading wire:target="importLeadsFile">Importing...</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
     @endif
 
     <!-- Search and Filter -->
@@ -2120,7 +2170,7 @@ new class extends Component
             </button>
             <button
                 type="button"
-                class="w-11 h-11 rounded-full bg-emerald-600 text-white shadow-lg hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2"
+                class="w-11 h-11 rounded-full bg-blue-600 text-white shadow-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
                 title="Scroll to bottom"
                 aria-label="Scroll to bottom"
                 onclick="window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });"
