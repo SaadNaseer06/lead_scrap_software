@@ -114,7 +114,7 @@ new class extends Component
             return [];
         }
 
-        return $this->splitSocialLinks($this->lead->social_links ?? $this->lead->linkedin ?? '');
+        return $this->splitSocialLinks($this->lead->social_links ?? '');
     }
 
     protected function splitSocialLinks(?string $value): array

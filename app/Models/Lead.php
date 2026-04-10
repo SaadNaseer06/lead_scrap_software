@@ -25,7 +25,6 @@ class Lead extends Model
         'location',
         'position',
         'platform',
-        'linkedin',
         'social_links',
         'detail',
         'web_link',

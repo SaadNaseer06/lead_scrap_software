@@ -12,9 +12,12 @@ use Livewire\WithFileUploads;
 use Livewire\Attributes\On;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Illuminate\Database\Eloquent\Builder;
+use OpenSpout\Common\Entity\Row;
 use OpenSpout\Reader\CSV\Reader as CsvReader;
 use OpenSpout\Reader\ReaderInterface;
 use OpenSpout\Reader\XLSX\Reader as XlsxReader;
+use OpenSpout\Writer\XLSX\Writer as XlsxWriter;
 
 new class extends Component
 {
@@ -289,6 +292,339 @@ new class extends Component
         // The render method will automatically fetch fresh data
     }
 
+    public function exportLeads()
+    {
+        $writer = null;
+        $tempFilePath = null;
+
+        try {
+            if (!auth()->check()) {
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'You must be logged in to export leads.']);
+                return null;
+            }
+
+            $tempFilePath = tempnam(sys_get_temp_dir(), 'leads_export_');
+            if ($tempFilePath === false) {
+                throw new \RuntimeException('Unable to prepare export file.');
+            }
+
+            $xlsxFilePath = $tempFilePath . '.xlsx';
+            if (file_exists($xlsxFilePath)) {
+                @unlink($xlsxFilePath);
+            }
+            @rename($tempFilePath, $xlsxFilePath);
+            $tempFilePath = $xlsxFilePath;
+
+            $writer = new XlsxWriter();
+            $writer->openToFile($tempFilePath);
+
+            $this->writeExportWorkbook($writer);
+            $writer->close();
+            $writer = null;
+
+            return response()->download(
+                $tempFilePath,
+                $this->buildExportFileName(),
+                ['Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet']
+            )->deleteFileAfterSend(true);
+        } catch (\Throwable $e) {
+            if ($writer !== null) {
+                try {
+                    $writer->close();
+                } catch (\Throwable $closeException) {
+                    // Ignore close failures after export exception.
+                }
+            }
+
+            if ($tempFilePath && file_exists($tempFilePath)) {
+                @unlink($tempFilePath);
+            }
+
+            Log::error('Lead export failed', [
+                'user_id' => auth()->id(),
+                'error' => $e->getMessage(),
+            ]);
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to export leads. Please try again.']);
+            return null;
+        }
+    }
+
+    protected function writeExportWorkbook(XlsxWriter $writer): void
+    {
+        $usedSheetNames = [];
+        $firstSheetWritten = false;
+
+        if ($this->sheetFilter) {
+            $sheet = LeadSheet::with('leadGroups')->find($this->sheetFilter);
+            if (!$sheet) {
+                throw new \RuntimeException('Selected sheet was not found.');
+            }
+
+            $groups = LeadGroup::where('lead_sheet_id', $sheet->id)
+                ->orderBy('sort_order')
+                ->orderBy('name')
+                ->get();
+
+            foreach ($groups as $group) {
+                $query = $this->baseLeadsExportQuery()
+                    ->where('lead_sheet_id', $sheet->id)
+                    ->where('lead_group_id', $group->id);
+
+                $writtenRows = $this->writeExportSheet(
+                    $writer,
+                    $firstSheetWritten,
+                    $this->sanitizeExportSheetName($group->name ?: 'Group ' . $group->id, $usedSheetNames),
+                    $query
+                );
+
+                if ($writtenRows > 0) {
+                    $firstSheetWritten = true;
+                }
+            }
+
+            $ungroupedQuery = $this->baseLeadsExportQuery()
+                ->where('lead_sheet_id', $sheet->id)
+                ->whereNull('lead_group_id');
+
+            $ungroupedRows = $this->writeExportSheet(
+                $writer,
+                $firstSheetWritten,
+                $this->sanitizeExportSheetName('Ungrouped', $usedSheetNames),
+                $ungroupedQuery
+            );
+
+            if ($ungroupedRows > 0) {
+                $firstSheetWritten = true;
+            }
+        } else {
+            $query = $this->baseLeadsExportQuery();
+            $writtenRows = $this->writeExportSheet(
+                $writer,
+                $firstSheetWritten,
+                $this->sanitizeExportSheetName('Leads', $usedSheetNames),
+                $query
+            );
+
+            if ($writtenRows > 0) {
+                $firstSheetWritten = true;
+            }
+        }
+
+        if (!$firstSheetWritten) {
+            $this->writeExportSheet(
+                $writer,
+                false,
+                $this->sanitizeExportSheetName('Leads', $usedSheetNames),
+                $this->baseLeadsExportQuery()->whereRaw('1 = 0')
+            );
+        }
+    }
+
+    protected function writeExportSheet(XlsxWriter $writer, bool $firstSheetWritten, string $sheetName, Builder $query): int
+    {
+        if ($firstSheetWritten) {
+            $sheet = $writer->addNewSheetAndMakeItCurrent();
+        } else {
+            $sheet = $writer->getCurrentSheet();
+        }
+
+        $sheet->setName($sheetName);
+        $writer->addRow(Row::fromValues($this->exportHeaders()));
+
+        $writtenRows = 0;
+        $query->orderBy('id')
+            ->with(['creator', 'opener', 'comments.user', 'leadSheet', 'leadGroup'])
+            ->chunk(200, function ($leads) use ($writer, &$writtenRows) {
+                foreach ($leads as $lead) {
+                    $writer->addRow(Row::fromValues($this->leadExportRow($lead)));
+                    $writtenRows++;
+                }
+            });
+
+        return $writtenRows;
+    }
+
+    protected function baseLeadsExportQuery(): Builder
+    {
+        $query = Lead::query();
+
+        if (auth()->check()) {
+            if (auth()->user()->isScrapper()) {
+                $query->where('created_by', auth()->id());
+            } elseif (auth()->user()->isSalesTeam()) {
+                $userTeamIds = auth()->user()->teams()->pluck('teams.id')->toArray();
+                $query->whereHas('leadSheet', function ($q) use ($userTeamIds) {
+                    $q->where('created_by', auth()->id())
+                        ->orWhereHas('teams', fn ($t) => $t->whereIn('teams.id', $userTeamIds));
+                });
+            }
+        }
+
+        if ($this->search) {
+            $searchTerm = '%' . trim($this->search) . '%';
+            $query->where(function ($q) use ($searchTerm) {
+                $q->where('name', 'like', $searchTerm)
+                    ->orWhere('email', 'like', $searchTerm)
+                    ->orWhere('phone', 'like', $searchTerm)
+                    ->orWhere('company', 'like', $searchTerm)
+                    ->orWhere('services', 'like', $searchTerm)
+                    ->orWhere('location', 'like', $searchTerm)
+                    ->orWhere('position', 'like', $searchTerm)
+                    ->orWhere('platform', 'like', $searchTerm)
+                    ->orWhere('social_links', 'like', $searchTerm)
+                    ->orWhere('detail', 'like', $searchTerm)
+                    ->orWhere('web_link', 'like', $searchTerm)
+                    ->orWhere('notes', 'like', $searchTerm);
+            });
+        }
+
+        if ($this->statusFilter) {
+            $query->where('status', $this->statusFilter);
+        }
+
+        if ($this->sheetFilter) {
+            $query->where('lead_sheet_id', $this->sheetFilter);
+        } elseif ($this->groupFilter !== '' && $this->groupFilter !== null) {
+            $query->where('lead_group_id', $this->groupFilter);
+        }
+
+        return $query;
+    }
+
+    protected function exportHeaders(): array
+    {
+        return [
+            'Lead ID',
+            'Sheet',
+            'Group',
+            'Lead Date',
+            'Status',
+            'Name',
+            'Email',
+            'Phone',
+            'Company',
+            'Services',
+            'Budget',
+            'Credits',
+            'Location',
+            'Position',
+            'Platform',
+            'Social Links',
+            'Detail',
+            'Web Link',
+            'Notes',
+            'Opened By ID',
+            'Opened By',
+            'Opened At',
+            'Created By ID',
+            'Created By',
+            'Created At',
+            'Updated At',
+            'Comments Count',
+            'Comments',
+        ];
+    }
+
+    protected function leadExportRow(Lead $lead): array
+    {
+        $comments = $lead->comments
+            ->sortBy('created_at')
+            ->map(function ($comment) {
+                $author = $comment->user->name ?? 'Unknown';
+                $timestamp = $comment->created_at?->format('Y-m-d H:i:s') ?? '';
+                $message = str_replace(["\r\n", "\r"], "\n", trim((string) $comment->message));
+
+                return trim("{$timestamp} - {$author}: {$message}");
+            })
+            ->filter()
+            ->values()
+            ->all();
+
+        $socialLinks = $this->resolveLeadSocialLinks($lead);
+
+        return [
+            $lead->id,
+            $this->sanitizeSpreadsheetValue($lead->leadSheet?->name ?? ''),
+            $this->sanitizeSpreadsheetValue($lead->leadGroup?->name ?? 'Ungrouped'),
+            $lead->lead_date?->format('Y-m-d') ?? '',
+            $this->sanitizeSpreadsheetValue($lead->status ?? ''),
+            $this->sanitizeSpreadsheetValue($lead->name ?? ''),
+            $this->sanitizeSpreadsheetValue($lead->email ?? ''),
+            $this->sanitizeSpreadsheetValue($lead->phone ?? ''),
+            $this->sanitizeSpreadsheetValue($lead->company ?? ''),
+            $this->sanitizeSpreadsheetValue($lead->services ?? ''),
+            $this->sanitizeSpreadsheetValue($lead->budget ?? ''),
+            $this->sanitizeSpreadsheetValue($lead->credits ?? ''),
+            $this->sanitizeSpreadsheetValue($lead->location ?? ''),
+            $this->sanitizeSpreadsheetValue($lead->position ?? ''),
+            $this->sanitizeSpreadsheetValue($lead->platform ?? ''),
+            $this->sanitizeSpreadsheetValue($socialLinks),
+            $this->sanitizeSpreadsheetValue($lead->detail ?? ''),
+            $this->sanitizeSpreadsheetValue($lead->web_link ?? ''),
+            $this->sanitizeSpreadsheetValue($lead->notes ?? ''),
+            $lead->opened_by ?? '',
+            $this->sanitizeSpreadsheetValue($lead->opener?->name ?? ''),
+            $lead->opened_at?->format('Y-m-d H:i:s') ?? '',
+            $lead->created_by ?? '',
+            $this->sanitizeSpreadsheetValue($lead->creator?->name ?? ''),
+            $lead->created_at?->format('Y-m-d H:i:s') ?? '',
+            $lead->updated_at?->format('Y-m-d H:i:s') ?? '',
+            count($comments),
+            $this->sanitizeSpreadsheetValue(implode("\n\n", $comments)),
+        ];
+    }
+
+    protected function sanitizeSpreadsheetValue(?string $value): string
+    {
+        $value = trim((string) ($value ?? ''));
+        if ($value === '') {
+            return '';
+        }
+
+        if (preg_match('/^[=\-+@]/', $value)) {
+            return "'" . $value;
+        }
+
+        return $value;
+    }
+
+    protected function sanitizeExportSheetName(string $name, array &$usedNames): string
+    {
+        $base = trim($name);
+        $base = preg_replace('/[\\\\\\/\\?\\*\\:\\[\\]]+/', ' ', $base) ?? '';
+        $base = trim(preg_replace('/\\s+/', ' ', $base) ?? '');
+        if ($base === '') {
+            $base = 'Sheet';
+        }
+
+        $base = mb_substr($base, 0, 31);
+        $candidate = $base;
+        $suffix = 2;
+
+        while (in_array(mb_strtolower($candidate), $usedNames, true)) {
+            $suffixText = ' (' . $suffix . ')';
+            $candidate = mb_substr($base, 0, 31 - mb_strlen($suffixText)) . $suffixText;
+            $suffix++;
+        }
+
+        $usedNames[] = mb_strtolower($candidate);
+
+        return $candidate;
+    }
+
+    protected function buildExportFileName(): string
+    {
+        $timestamp = now()->format('Ymd_His');
+
+        if ($this->sheetFilter) {
+            $sheet = LeadSheet::find($this->sheetFilter);
+            $sheetName = $sheet?->name ? Str::slug($sheet->name, '_') : 'sheet';
+            return "leads_{$sheetName}_{$timestamp}.xlsx";
+        }
+
+        return "leads_export_{$timestamp}.xlsx";
+    }
+
     public function importLeadsFile()
     {
         $reader = null;
@@ -371,7 +707,6 @@ new class extends Component
                         'location' => $payload['location'] ?? null,
                         'position' => $payload['position'] ?? null,
                         'platform' => $payload['platform'] ?? null,
-                        'linkedin' => $this->extractPrimarySocialLink($payload['social_links'] ?? null),
                         'social_links' => $payload['social_links'] ?? null,
                         'detail' => $payload['detail'] ?? null,
                         'web_link' => $payload['web_link'] ?? null,
@@ -668,14 +1003,10 @@ new class extends Component
         return empty($links) ? null : implode("\n", $links);
     }
 
-    protected function extractPrimarySocialLink(?string $value): ?string
-    {
-        return $this->splitSocialLinks($value)[0] ?? null;
-    }
 
     protected function resolveLeadSocialLinks(Lead $lead): string
     {
-        return $this->normalizeSocialLinks($lead->social_links ?: $lead->linkedin ?: '') ?? '';
+        return $this->normalizeSocialLinks($lead->social_links) ?? '';
     }
 
     public function updatedLeadsData($value, $key)
@@ -781,7 +1112,6 @@ new class extends Component
                         'location' => !empty($row['location']) ? trim($row['location']) : null,
                         'position' => !empty($row['position']) ? trim($row['position']) : null,
                         'platform' => !empty($row['platform']) ? trim($row['platform']) : null,
-                        'linkedin' => $this->extractPrimarySocialLink($normalizedSocialLinks),
                         'detail' => !empty($row['detail']) ? trim($row['detail']) : null,
                         'web_link' => !empty($row['web_link']) ? trim($row['web_link']) : null,
                     ]);
@@ -817,7 +1147,6 @@ new class extends Component
                 if ($field === 'social_links') {
                     $normalizedSocialLinks = $this->normalizeSocialLinks(is_string($value) ? $value : null);
                     $updateData['social_links'] = $normalizedSocialLinks;
-                    $updateData['linkedin'] = $this->extractPrimarySocialLink($normalizedSocialLinks);
                     $this->leadsData[$index]['social_links'] = $normalizedSocialLinks ?? '';
                 }
 
@@ -1083,7 +1412,6 @@ new class extends Component
                       ->orWhere('position', 'like', $searchTerm)
                       ->orWhere('platform', 'like', $searchTerm)
                       ->orWhere('social_links', 'like', $searchTerm)
-                      ->orWhere('linkedin', 'like', $searchTerm)
                       ->orWhere('detail', 'like', $searchTerm)
                       ->orWhere('web_link', 'like', $searchTerm);
                 });
@@ -1154,17 +1482,31 @@ new class extends Component
                 <h1 class="text-3xl font-bold text-gray-900">Leads Management</h1>
                 <p class="text-gray-600 mt-1">Manage and track all your leads</p>
             </div>
-            @if(auth()->user()->canCreateLeads())
+            <div class="flex items-center gap-3">
                 <button 
-                    wire:click="$dispatch('open-create-modal')"
-                    class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg font-semibold shadow-sm hover:shadow-md transition-all flex items-center space-x-2"
+                    wire:click="exportLeads"
+                    wire:loading.attr="disabled"
+                    wire:target="exportLeads"
+                    class="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-lg font-semibold shadow-sm hover:shadow-md transition-all flex items-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 16v-8m0 8l-3-3m3 3l3-3M5 20h14"></path>
                     </svg>
-                    <span>Add New Lead</span>
+                    <span wire:loading.remove wire:target="exportLeads">Export Leads</span>
+                    <span wire:loading wire:target="exportLeads">Exporting...</span>
                 </button>
-            @endif
+                @if(auth()->user()->canCreateLeads())
+                    <button 
+                        wire:click="$dispatch('open-create-modal')"
+                        class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg font-semibold shadow-sm hover:shadow-md transition-all flex items-center space-x-2"
+                    >
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
+                        </svg>
+                        <span>Add New Lead</span>
+                    </button>
+                @endif
+            </div>
         </div>
     </div>
 
@@ -1760,6 +2102,33 @@ new class extends Component
         </div>
         <div class="mt-6">
             {{ $leads->links() }}
+        </div>
+    @endif
+
+    @if(auth()->user()->isScrapper() && $viewMode === 'table')
+        <div class="fixed bottom-6 right-6 z-40 flex flex-col gap-2">
+            <button
+                type="button"
+                class="w-11 h-11 rounded-full bg-blue-600 text-white shadow-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+                title="Scroll to top"
+                aria-label="Scroll to top"
+                onclick="window.scrollTo({ top: 0, behavior: 'smooth' });"
+            >
+                <svg class="w-5 h-5 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path>
+                </svg>
+            </button>
+            <button
+                type="button"
+                class="w-11 h-11 rounded-full bg-emerald-600 text-white shadow-lg hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2"
+                title="Scroll to bottom"
+                aria-label="Scroll to bottom"
+                onclick="window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });"
+            >
+                <svg class="w-5 h-5 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                </svg>
+            </button>
         </div>
     @endif
 </div>
