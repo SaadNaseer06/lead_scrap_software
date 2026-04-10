@@ -48,9 +48,23 @@ new class extends Component
         $this->resetPage();
     }
 
+    public function updatedSearch()
+    {
+        if (auth()->check() && $this->viewMode === 'table' && $this->canEditAcrossAllSheets()) {
+            $this->loadSheetLeads();
+        }
+    }
+
     public function updatingStatusFilter()
     {
         $this->resetPage();
+    }
+
+    public function updatedStatusFilter()
+    {
+        if (auth()->check() && $this->viewMode === 'table' && $this->canEditAcrossAllSheets()) {
+            $this->loadSheetLeads();
+        }
     }
 
     public function updatingSheetFilter()
@@ -303,6 +317,8 @@ new class extends Component
                 return null;
             }
 
+            $this->persistTableRowsForExport();
+
             $tempFilePath = tempnam(sys_get_temp_dir(), 'leads_export_');
             if ($tempFilePath === false) {
                 throw new \RuntimeException('Unable to prepare export file.');
@@ -344,8 +360,74 @@ new class extends Component
                 'user_id' => auth()->id(),
                 'error' => $e->getMessage(),
             ]);
-            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to export leads. Please try again.']);
+            $message = $e instanceof \RuntimeException
+                ? $e->getMessage()
+                : 'Failed to export leads. Please try again.';
+            $this->dispatch('show-toast', ['type' => 'error', 'message' => $message]);
             return null;
+        }
+    }
+
+    protected function persistTableRowsForExport(): void
+    {
+        if ($this->viewMode !== 'table' || !$this->canEditAcrossAllSheets()) {
+            return;
+        }
+
+        $rows = $this->leadsData;
+
+        foreach ($rows as $index => $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $name = trim((string) ($row['name'] ?? ''));
+            if ($name === '') {
+                continue;
+            }
+
+            $email = trim((string) ($row['email'] ?? ''));
+            if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                throw new \RuntimeException('Please fix invalid email addresses before exporting.');
+            }
+
+            $payload = [
+                'name' => $name,
+                'email' => $email !== '' ? $email : null,
+                'services' => ($services = trim((string) ($row['services'] ?? ''))) !== '' ? $services : null,
+                'phone' => ($phone = trim((string) ($row['phone'] ?? ''))) !== '' ? $phone : null,
+                'location' => ($location = trim((string) ($row['location'] ?? ''))) !== '' ? $location : null,
+                'position' => ($position = trim((string) ($row['position'] ?? ''))) !== '' ? $position : null,
+                'platform' => ($platform = trim((string) ($row['platform'] ?? ''))) !== '' ? $platform : null,
+                'social_links' => $this->normalizeSocialLinks(($row['social_links'] ?? null)),
+                'detail' => ($detail = trim((string) ($row['detail'] ?? ''))) !== '' ? $detail : null,
+                'web_link' => ($webLink = trim((string) ($row['web_link'] ?? ''))) !== '' ? $webLink : null,
+            ];
+
+            if (!empty($row['id'])) {
+                Lead::where('id', $row['id'])
+                    ->where('created_by', auth()->id())
+                    ->update($payload);
+
+                $this->leadsData[$index]['social_links'] = $payload['social_links'] ?? '';
+                continue;
+            }
+
+            if (!$this->sheetFilter || $this->groupFilter === '' || $this->groupFilter === null) {
+                continue;
+            }
+
+            $lead = Lead::create([
+                'created_by' => auth()->id(),
+                'lead_sheet_id' => $this->sheetFilter,
+                'lead_group_id' => $this->groupFilter ?: null,
+                'lead_date' => now()->toDateString(),
+                'status' => 'no response',
+                ...$payload,
+            ]);
+
+            $this->leadsData[$index]['id'] = $lead->id;
+            $this->leadsData[$index]['social_links'] = $payload['social_links'] ?? '';
         }
     }
 
@@ -1179,6 +1261,7 @@ new class extends Component
 
                 $this->leadsData = Lead::with(['leadSheet', 'leadGroup'])
                     ->where('created_by', auth()->id())
+                    ->tap(fn ($query) => $this->applyTableSearchAndStatusFilters($query))
                     ->orderBy('created_at', 'desc')
                     ->get()
                     ->map(function ($lead) {
@@ -1224,6 +1307,7 @@ new class extends Component
 
             $leadsQuery = Lead::where('created_by', auth()->id())
                 ->where('lead_sheet_id', $this->sheetFilter);
+            $this->applyTableSearchAndStatusFilters($leadsQuery);
             $this->applySelectedGroupScope($leadsQuery);
             $this->leadsData = $leadsQuery->orderBy('created_at', 'desc')
                 ->get()
@@ -1318,6 +1402,32 @@ new class extends Component
         }
 
         $query->whereRaw('1 = 0');
+    }
+
+    protected function applyTableSearchAndStatusFilters($query): void
+    {
+        if ($this->search) {
+            $searchTerm = '%' . trim($this->search) . '%';
+
+            $query->where(function ($q) use ($searchTerm) {
+                $q->where('name', 'like', $searchTerm)
+                    ->orWhere('email', 'like', $searchTerm)
+                    ->orWhere('phone', 'like', $searchTerm)
+                    ->orWhere('company', 'like', $searchTerm)
+                    ->orWhere('services', 'like', $searchTerm)
+                    ->orWhere('location', 'like', $searchTerm)
+                    ->orWhere('position', 'like', $searchTerm)
+                    ->orWhere('platform', 'like', $searchTerm)
+                    ->orWhere('social_links', 'like', $searchTerm)
+                    ->orWhere('detail', 'like', $searchTerm)
+                    ->orWhere('web_link', 'like', $searchTerm)
+                    ->orWhere('notes', 'like', $searchTerm);
+            });
+        }
+
+        if ($this->statusFilter) {
+            $query->where('status', $this->statusFilter);
+        }
     }
 
     public function mount()
