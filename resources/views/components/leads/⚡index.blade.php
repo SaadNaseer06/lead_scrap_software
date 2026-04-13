@@ -388,7 +388,9 @@ new class extends Component
 
             $email = trim((string) ($row['email'] ?? ''));
             if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
-                throw new \RuntimeException('Please fix invalid email addresses before exporting.');
+                // Do not block export for table rows with invalid in-progress edits.
+                // The export query reads persisted DB records; skip mutating this row.
+                continue;
             }
 
             $payload = [
@@ -479,16 +481,59 @@ new class extends Component
                 $firstSheetWritten = true;
             }
         } else {
-            $query = $this->baseLeadsExportQuery();
-            $writtenRows = $this->writeExportSheet(
-                $writer,
-                $firstSheetWritten,
-                $this->sanitizeExportSheetName('Leads', $usedSheetNames),
-                $query
-            );
+            $sheetsQuery = LeadSheet::query()->orderBy('created_at', 'desc');
 
-            if ($writtenRows > 0) {
-                $firstSheetWritten = true;
+            if (auth()->check()) {
+                if (auth()->user()->isScrapper()) {
+                    $sheetsQuery->where('created_by', auth()->id());
+                } elseif (auth()->user()->isSalesTeam()) {
+                    $userTeamIds = auth()->user()->teams()->pluck('teams.id')->toArray();
+                    $sheetsQuery->where(function ($q) use ($userTeamIds) {
+                        $q->where('created_by', auth()->id())
+                            ->orWhereHas('teams', fn ($t) => $t->whereIn('teams.id', $userTeamIds));
+                    });
+                }
+            }
+
+            $sheets = $sheetsQuery->get();
+
+            foreach ($sheets as $sheet) {
+                $groups = LeadGroup::where('lead_sheet_id', $sheet->id)
+                    ->orderBy('sort_order')
+                    ->orderBy('name')
+                    ->get();
+
+                foreach ($groups as $group) {
+                    $query = $this->baseLeadsExportQuery()
+                        ->where('lead_sheet_id', $sheet->id)
+                        ->where('lead_group_id', $group->id);
+
+                    $writtenRows = $this->writeExportSheet(
+                        $writer,
+                        $firstSheetWritten,
+                        $this->sanitizeExportSheetName(($sheet->name ?: 'Sheet ' . $sheet->id) . ' - ' . ($group->name ?: 'Group ' . $group->id), $usedSheetNames),
+                        $query
+                    );
+
+                    if ($writtenRows > 0) {
+                        $firstSheetWritten = true;
+                    }
+                }
+
+                $ungroupedQuery = $this->baseLeadsExportQuery()
+                    ->where('lead_sheet_id', $sheet->id)
+                    ->whereNull('lead_group_id');
+
+                $ungroupedRows = $this->writeExportSheet(
+                    $writer,
+                    $firstSheetWritten,
+                    $this->sanitizeExportSheetName(($sheet->name ?: 'Sheet ' . $sheet->id) . ' - Ungrouped', $usedSheetNames),
+                    $ungroupedQuery
+                );
+
+                if ($ungroupedRows > 0) {
+                    $firstSheetWritten = true;
+                }
             }
         }
 
@@ -566,8 +611,6 @@ new class extends Component
 
         if ($this->sheetFilter) {
             $query->where('lead_sheet_id', $this->sheetFilter);
-        } elseif ($this->groupFilter !== '' && $this->groupFilter !== null) {
-            $query->where('lead_group_id', $this->groupFilter);
         }
 
         return $query;
@@ -1907,8 +1950,11 @@ new class extends Component
                         </thead>
                         <tbody class="bg-white divide-y divide-gray-200">
                             @forelse($leadsData as $index => $row)
+                                @php
+                                    $rowKey = $row['_row_key'] ?? ('idx-' . $index);
+                                @endphp
                                 <tr
-                                    wire:key="lead-row-{{ $row['_row_key'] ?? Str::uuid() }}"
+                                    wire:key="lead-row-{{ $rowKey }}"
                                     class="{{ empty($row['id']) ? 'bg-blue-50' : 'hover:bg-gray-50' }}"
                                 >
                                     @if(!$sheetFilter)
@@ -1920,34 +1966,34 @@ new class extends Component
                                         </td>
                                     @endif
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.name" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Name">
+                                        <input type="text" wire:key="lead-name-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.name" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Name">
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="email" wire:model.live.debounce.500ms="leadsData.{{ $index }}.email" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Email">
+                                        <input type="email" wire:key="lead-email-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.email" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Email">
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.services" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Services">
+                                        <input type="text" wire:key="lead-services-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.services" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Services">
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.phone" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Phone">
+                                        <input type="text" wire:key="lead-phone-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.phone" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Phone">
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.location" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Location">
+                                        <input type="text" wire:key="lead-location-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.location" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Location">
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.position" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Position">
+                                        <input type="text" wire:key="lead-position-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.position" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Position">
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.platform" class="w-32 px-2 py-1 border border-gray-300 rounded" placeholder="Platform">
+                                        <input type="text" wire:key="lead-platform-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.platform" class="w-32 px-2 py-1 border border-gray-300 rounded" placeholder="Platform">
                                     </td>
                                     <td class="px-4 py-2">
-                                        <textarea wire:model.live.debounce.500ms="leadsData.{{ $index }}.social_links" class="w-56 px-2 py-1 border border-gray-300 rounded" rows="2" placeholder="Social links (LinkedIn, Facebook, Instagram)"></textarea>
+                                        <textarea wire:key="lead-social-links-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.social_links" class="w-56 px-2 py-1 border border-gray-300 rounded" rows="2" placeholder="Social links (LinkedIn, Facebook, Instagram)"></textarea>
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.detail" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Details">
+                                        <input type="text" wire:key="lead-detail-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.detail" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Details">
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:model.live.debounce.500ms="leadsData.{{ $index }}.web_link" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Web link">
+                                        <input type="text" wire:key="lead-web-link-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.web_link" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Web link">
                                     </td>
                                     <td class="px-4 py-2">
                                         @if(!empty($row['id']))
