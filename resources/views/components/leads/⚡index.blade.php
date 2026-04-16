@@ -33,10 +33,14 @@ new class extends Component
     public $importFile;
     public $leadsData = [];
     public $pendingCreates = [];
+    public $draftLeadRows = [];
     public $editingGroupId = null;
     public $editingGroupName = '';
     public $addGroupFormKey = 1;
     public $tableStateSignature = '';
+    public $hasMoreTableRows = false;
+    public $tableCursorId = null;
+    public $tableLoadedCount = 0;
     private $rowUniqueIds = [];
     protected $queryString = [
         'search' => ['except' => ''],
@@ -54,8 +58,7 @@ new class extends Component
     public function updatedSearch()
     {
         if (auth()->check() && $this->viewMode === 'table' && $this->canEditAcrossAllSheets()) {
-            $this->pendingCreates = [];
-            $this->leadsData = [];
+            $this->resetTableViewport();
             $this->loadSheetLeads();
         }
     }
@@ -68,8 +71,7 @@ new class extends Component
     public function updatedStatusFilter()
     {
         if (auth()->check() && $this->viewMode === 'table' && $this->canEditAcrossAllSheets()) {
-            $this->pendingCreates = [];
-            $this->leadsData = [];
+            $this->resetTableViewport();
             $this->loadSheetLeads();
         }
     }
@@ -88,8 +90,7 @@ new class extends Component
             $this->groupFilter = '';
             $this->editingGroupId = null;
             $this->editingGroupName = '';
-            $this->pendingCreates = [];
-            $this->leadsData = [];
+            $this->resetTableViewport();
             $this->loadSheetLeads();
             return;
         }
@@ -106,16 +107,14 @@ new class extends Component
         $this->groupFilter = $firstGroupId ? (string) $firstGroupId : null;
         $this->editingGroupId = null;
         $this->editingGroupName = '';
-        $this->pendingCreates = [];
-        $this->leadsData = [];
+        $this->resetTableViewport();
         $this->resetPage();
         $this->loadSheetLeads();
     }
 
     public function updatedGroupFilter()
     {
-        $this->pendingCreates = [];
-        $this->leadsData = [];
+        $this->resetTableViewport();
         $this->editingGroupId = null;
         $this->editingGroupName = '';
         $this->resetPage();
@@ -138,8 +137,7 @@ new class extends Component
         }
 
         $this->groupFilter = (string) $groupId;
-        $this->pendingCreates = [];
-        $this->leadsData = [];
+        $this->resetTableViewport();
         $this->resetPage();
         $this->loadSheetLeads();
     }
@@ -163,6 +161,7 @@ new class extends Component
         $this->groupFilter = (string) $group->id;
         $this->resetValidation();
         $this->addGroupFormKey++;
+        $this->resetTableViewport();
         $this->loadSheetLeads();
         $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Tab added.']);
     }
@@ -179,6 +178,7 @@ new class extends Component
         $group->leads()->delete();
         $group->delete();
         if ($this->groupFilter == $groupId) $this->groupFilter = '';
+        $this->resetTableViewport();
         $this->loadSheetLeads();
         $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Tab removed. Leads in it were soft-deleted.']);
     }
@@ -263,7 +263,7 @@ new class extends Component
             $this->leadsData,
             fn ($row) => ($row['id'] ?? null) !== $leadId
         ));
-        $this->ensureEmptyRow();
+        $this->tableLoadedCount = $this->visibleTableRecordCount();
         $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Lead deleted successfully.']);
         $this->dispatch('lead-updated');
     }
@@ -273,7 +273,12 @@ new class extends Component
     #[On('lead-opened')]
     public function refreshLeads()
     {
-        // Reset to first page when new leads are added
+        if (auth()->check() && $this->viewMode === 'table' && $this->canEditAcrossAllSheets()) {
+            $this->resetTableViewport();
+            $this->loadSheetLeads();
+            return;
+        }
+
         $this->resetPage();
     }
 
@@ -300,8 +305,7 @@ new class extends Component
             ->orderBy('name')
             ->value('id');
         $this->groupFilter = $firstGroupId ? (string) $firstGroupId : null;
-        $this->pendingCreates = [];
-        $this->leadsData = [];
+        $this->resetTableViewport();
         $this->editingGroupId = null;
         $this->editingGroupName = '';
         $this->loadSheetLeads();
@@ -875,8 +879,7 @@ new class extends Component
             $this->importFile = null;
             $this->resetValidation(['importFile', 'importSheetId']);
 
-            $this->pendingCreates = [];
-            $this->leadsData = [];
+            $this->resetTableViewport();
             $this->loadSheetLeads();
             $this->resetPage();
             $this->dispatch('lead-created');
@@ -1269,6 +1272,21 @@ new class extends Component
         return auth()->check() && auth()->user()->isScrapper();
     }
 
+    protected function resetTableViewport(): void
+    {
+        $this->pendingCreates = [];
+        $this->leadsData = [];
+        $this->draftLeadRows = [];
+        $this->hasMoreTableRows = false;
+        $this->tableCursorId = null;
+        $this->tableLoadedCount = 0;
+    }
+
+    protected function tableChunkSize(): int
+    {
+        return 50;
+    }
+
     protected function splitSocialLinks(?string $value): array
     {
         if ($value === null) {
@@ -1339,7 +1357,7 @@ new class extends Component
                         ->where('created_by', auth()->id())
                         ->delete();
                     array_splice($this->leadsData, (int) $index, 1);
-                    $this->ensureEmptyRow();
+                    $this->tableLoadedCount = $this->visibleTableRecordCount();
                     $this->dispatch('lead-updated');
                 } catch (\Exception $e) {
                     \Illuminate\Support\Facades\Log::error('Error deleting lead: ' . $e->getMessage());
@@ -1353,86 +1371,7 @@ new class extends Component
                 return;
             }
 
-            if (!$this->sheetFilter && empty($row['id'])) {
-                return;
-            }
-
-            if ($this->sheetFilter && ($this->groupFilter === '' || $this->groupFilter === null) && empty($row['id'])) {
-                return;
-            }
-
             if (empty($row['id'])) {
-                if (empty($row['name'])) {
-                    return;
-                }
-
-                if (!empty($this->pendingCreates[$index])) {
-                    return;
-                }
-
-                $this->pendingCreates[$index] = true;
-
-                try {
-                    $existingLead = Lead::where('created_by', auth()->id())
-                        ->where('lead_sheet_id', $this->sheetFilter)
-                        ->where('name', $row['name'])
-                        ->whereDate('lead_date', now()->toDateString());
-
-                    if ($this->groupFilter !== '' && $this->groupFilter !== null) {
-                        $existingLead->where('lead_group_id', $this->groupFilter);
-                    } else {
-                        $existingLead->whereNull('lead_group_id');
-                    }
-
-                    $existingLead = $existingLead
-                        ->orderBy('created_at', 'desc')
-                        ->first();
-
-                    if ($existingLead) {
-                        $this->leadsData[$index]['id'] = $existingLead->id;
-                        $this->pendingCreates[$index] = false;
-                        return;
-                    }
-
-                    $lead = Lead::create([
-                        'social_links' => $normalizedSocialLinks = $this->normalizeSocialLinks(!empty($row['social_links']) ? trim($row['social_links']) : null),
-                        'created_by' => auth()->id(),
-                        'lead_sheet_id' => $this->sheetFilter,
-                        'lead_group_id' => $this->groupFilter ?: null,
-                        'lead_date' => now()->toDateString(),
-                        'status' => 'no response',
-                        'name' => trim($row['name']),
-                        'email' => !empty($row['email']) ? trim($row['email']) : null,
-                        'services' => !empty($row['services']) ? trim($row['services']) : null,
-                        'phone' => !empty($row['phone']) ? trim($row['phone']) : null,
-                        'location' => !empty($row['location']) ? trim($row['location']) : null,
-                        'position' => !empty($row['position']) ? trim($row['position']) : null,
-                        'platform' => !empty($row['platform']) ? trim($row['platform']) : null,
-                        'detail' => !empty($row['detail']) ? trim($row['detail']) : null,
-                        'web_link' => !empty($row['web_link']) ? trim($row['web_link']) : null,
-                    ]);
-
-                    // Notify sales users and broadcast the update to their active clients.
-                    $salesUsers = User::whereIn('role', ['sales', 'upsale', 'front_sale'])->get();
-                    
-                    if ($salesUsers->isNotEmpty()) {
-                        NotificationService::createForUsers(
-                            $salesUsers,
-                            $lead,
-                            'new_lead',
-                            "New lead '{$lead->name}' has been added by " . auth()->user()->name
-                        );
-                    }
-
-                    $this->leadsData[$index]['id'] = $lead->id;
-                    $this->dispatch('lead-created');
-                    $this->ensureEmptyRow();
-                    $this->pendingCreates[$index] = false;
-                } catch (\Exception $e) {
-                    \Illuminate\Support\Facades\Log::error('Error creating lead in table: ' . $e->getMessage());
-                    $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to save lead. Please try again.']);
-                    $this->pendingCreates[$index] = false;
-                }
                 return;
             }
 
@@ -1458,126 +1397,336 @@ new class extends Component
         }
     }
 
-    public function loadSheetLeads()
+    public function updatedDraftLeadRows($value, $key)
     {
         try {
-            if (!auth()->check()) {
-                $this->leadsData = [$this->emptyRow()];
+            if (!auth()->check() || !$this->canEditAcrossAllSheets()) {
                 return;
             }
 
-            if (!$this->sheetFilter) {
-                if (!$this->canEditAcrossAllSheets()) {
-                    $this->leadsData = [];
+            [$index, $field] = explode('.', $key) + [null, null];
+            if ($index === null || $field === null) {
+                return;
+            }
+
+            $allowed = ['name', 'email', 'services', 'phone', 'location', 'position', 'platform', 'social_links', 'detail', 'web_link'];
+            if (!in_array($field, $allowed, true)) {
+                return;
+            }
+
+            if (!$this->shouldAppendTableDraftRow()) {
+                $this->draftLeadRows = [];
+                return;
+            }
+
+            $row = $this->draftLeadRows[$index] ?? null;
+            if (!$row) {
+                return;
+            }
+
+            $value = is_string($value) ? trim($value) : $value;
+
+            if ($field === 'email' && $value && !filter_var($value, FILTER_VALIDATE_EMAIL)) {
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Invalid email format.']);
+                return;
+            }
+
+            if ($field === 'social_links') {
+                $normalizedSocialLinks = $this->normalizeSocialLinks(is_string($value) ? $value : null);
+                $this->draftLeadRows[$index]['social_links'] = $normalizedSocialLinks ?? '';
+                $row['social_links'] = $normalizedSocialLinks ?? '';
+            }
+
+            if (!$this->sheetFilter || $this->groupFilter === '' || $this->groupFilter === null) {
+                return;
+            }
+
+            if (!empty($row['id'])) {
+                if ($field === 'name' && trim((string) $value) === '') {
+                    Lead::where('id', $row['id'])
+                        ->where('created_by', auth()->id())
+                        ->delete();
+                    array_splice($this->draftLeadRows, (int) $index, 1);
+                    $this->ensureTrailingDraftRow();
+                    $this->tableLoadedCount = $this->visibleTableRecordCount();
                     return;
                 }
 
-                $this->leadsData = Lead::with(['leadSheet', 'leadGroup'])
+                $updateData = [$field => $value];
+                if ($field === 'social_links') {
+                    $updateData['social_links'] = $this->draftLeadRows[$index]['social_links'] ?: null;
+                }
+
+                Lead::where('id', $row['id'])
                     ->where('created_by', auth()->id())
-                    ->tap(fn ($query) => $this->applyTableSearchAndStatusFilters($query))
-                    ->orderBy('created_at', 'desc')
-                    ->get()
-                    ->map(function ($lead) {
-                        return [
-                            '_row_key' => 'lead-'.$lead->id,
-                            'id' => $lead->id,
-                            'sheet_name' => $lead->leadSheet?->name ?? '',
-                            'group_name' => $lead->leadGroup?->name ?? 'Ungrouped',
-                            'name' => $lead->name ?? '',
-                            'email' => $lead->email ?? '',
-                            'services' => $lead->services ?? '',
-                            'phone' => $lead->phone ?? '',
-                            'location' => $lead->location ?? '',
-                            'position' => $lead->position ?? '',
-                            'platform' => $lead->platform ?? '',
-                            'social_links' => $this->resolveLeadSocialLinks($lead),
-                            'detail' => $lead->detail ?? '',
-                            'web_link' => $lead->web_link ?? '',
-                        ];
-                    })
-                    ->values()
-                    ->all();
+                    ->update($updateData);
 
                 return;
             }
 
-            $sheet = LeadSheet::find($this->sheetFilter);
-            if (!$sheet || $sheet->created_by !== auth()->id()) {
-                $this->leadsData = [$this->emptyRow()];
-                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Selected sheet not found or access denied.']);
-                return;
-            }
-            // Only scrapper can load editable grid rows for own sheets.
-            if (!auth()->user()->isScrapper()) {
-                $this->leadsData = [$this->emptyRow()];
+            $draftName = trim((string) ($row['name'] ?? ''));
+            if ($draftName === '') {
+                $this->ensureTrailingDraftRow();
                 return;
             }
 
-            if (($this->groupFilter === '' || $this->groupFilter === null) && !$this->hasActiveTableFilters()) {
-                $this->leadsData = [];
+            $pendingKey = 'draft_' . $index;
+            if (!empty($this->pendingCreates[$pendingKey])) {
                 return;
             }
 
-            $leadsQuery = Lead::where('created_by', auth()->id())
-                ->where('lead_sheet_id', $this->sheetFilter);
-            $this->applyTableSearchAndStatusFilters($leadsQuery);
-            if ($this->shouldApplySelectedGroupScopeToTableQuery()) {
-                $this->applySelectedGroupScope($leadsQuery);
+            $this->pendingCreates[$pendingKey] = true;
+
+            try {
+                $lead = $this->persistDraftLeadRow($this->draftLeadRows[$index]);
+                if ($lead) {
+                    $this->draftLeadRows[$index] = array_merge($this->draftLeadRows[$index], $this->mapLeadToTableRow($lead, false));
+                    $this->ensureTrailingDraftRow();
+                    $this->tableLoadedCount = $this->visibleTableRecordCount();
+                }
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::error('Error creating lead in draft row: ' . $e->getMessage());
+                $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to save lead. Please try again.']);
+            } finally {
+                unset($this->pendingCreates[$pendingKey]);
             }
-            $this->leadsData = $leadsQuery->orderBy('created_at', 'desc')
-                ->get()
-                ->map(function ($lead) {
-                    return [
-                        '_row_key' => 'lead-'.$lead->id,
-                        'id' => $lead->id,
-                        'name' => $lead->name ?? '',
-                        'email' => $lead->email ?? '',
-                        'services' => $lead->services ?? '',
-                        'phone' => $lead->phone ?? '',
-                        'location' => $lead->location ?? '',
-                        'position' => $lead->position ?? '',
-                        'platform' => $lead->platform ?? '',
-                        'social_links' => $this->resolveLeadSocialLinks($lead),
-                        'detail' => $lead->detail ?? '',
-                        'web_link' => $lead->web_link ?? '',
-                    ];
-                })
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Error in updatedDraftLeadRows: ' . $e->getMessage());
+        }
+    }
+
+    public function loadSheetLeads(bool $append = false)
+    {
+        try {
+            if (!auth()->check() || !$this->canEditAcrossAllSheets()) {
+                $this->resetTableViewport();
+                return;
+            }
+
+            if ($append && !$this->hasMoreTableRows) {
+                return;
+            }
+
+            if (!$append) {
+                $this->resetTableViewport();
+            }
+
+            if ($this->sheetFilter) {
+                $sheet = LeadSheet::find($this->sheetFilter);
+                if (!$sheet || $sheet->created_by !== auth()->id()) {
+                    $this->resetTableViewport();
+                    $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Selected sheet not found or access denied.']);
+                    return;
+                }
+            }
+
+            if ($this->sheetFilter && ($this->groupFilter === '' || $this->groupFilter === null) && !$this->hasActiveTableFilters()) {
+                $this->resetTableViewport();
+                return;
+            }
+
+            $includeContext = !$this->sheetFilter;
+            $query = Lead::query()->where('created_by', auth()->id());
+
+            if ($includeContext) {
+                $query->with(['leadSheet', 'leadGroup']);
+            }
+
+            if ($this->sheetFilter) {
+                $query->where('lead_sheet_id', $this->sheetFilter);
+            }
+
+            $this->applyTableSearchAndStatusFilters($query);
+
+            if ($this->sheetFilter && $this->shouldApplySelectedGroupScopeToTableQuery()) {
+                $this->applySelectedGroupScope($query);
+            }
+
+            if ($this->tableCursorId !== null) {
+                $query->where('id', '<', $this->tableCursorId);
+            }
+
+            $chunkSize = $this->tableChunkSize();
+            $loadedLeads = $query
+                ->orderByDesc('id')
+                ->limit($chunkSize + 1)
+                ->get();
+
+            $this->hasMoreTableRows = $loadedLeads->count() > $chunkSize;
+            $visibleLeads = $loadedLeads->take($chunkSize);
+
+            $mappedRows = $visibleLeads
+                ->map(fn ($lead) => $this->mapLeadToTableRow($lead, $includeContext))
                 ->values()
                 ->all();
 
-            if (!$this->hasActiveTableFilters()) {
-                $this->ensureEmptyRow();
+            if ($append) {
+                $this->appendTableRows($mappedRows);
+            } else {
+                $this->leadsData = $mappedRows;
             }
+
+            $lastLoadedLead = $visibleLeads->last();
+            if ($lastLoadedLead) {
+                $this->tableCursorId = $lastLoadedLead->id;
+            }
+
+            $this->ensureTrailingDraftRow();
+            $this->tableLoadedCount = $this->visibleTableRecordCount();
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::error('Error loading sheet leads: ' . $e->getMessage());
-            $this->leadsData = [$this->emptyRow()];
+            $this->resetTableViewport();
+
             $this->dispatch('show-toast', type: 'error', message: 'Failed to load leads. Please try again.');
         }
     }
 
-    public function ensureEmptyRow()
+    public function loadMoreTableRows()
     {
-        // Don't add a new row if there's no data
-        if (empty($this->leadsData)) {
-            $this->leadsData[] = $this->emptyRow();
+        if (!auth()->check() || $this->viewMode !== 'table' || !$this->canEditAcrossAllSheets()) {
             return;
         }
 
-        $last = end($this->leadsData);
-        
-        // If last row is empty (no id and no name), don't add another empty row
-        if (!$last || (empty($last['id']) && empty($last['name']))) {
+        if (!$this->hasMoreTableRows) {
             return;
         }
 
-        // If last row has an ID (saved lead), always ensure there's an empty row after it
-        if (!empty($last['id'])) {
-            $this->leadsData[] = $this->emptyRow();
+        $this->loadSheetLeads(true);
+    }
+
+    protected function persistDraftLeadRow(array $draftRow): ?Lead
+    {
+        $existingLead = Lead::where('created_by', auth()->id())
+            ->where('lead_sheet_id', $this->sheetFilter)
+            ->where('name', trim((string) ($draftRow['name'] ?? '')))
+            ->whereDate('lead_date', now()->toDateString());
+
+        if ($this->groupFilter !== '' && $this->groupFilter !== null) {
+            $existingLead->where('lead_group_id', $this->groupFilter);
+        } else {
+            $existingLead->whereNull('lead_group_id');
+        }
+
+        $existingLead = $existingLead
+            ->orderBy('created_at', 'desc')
+            ->first();
+
+        if ($existingLead) {
+            return $existingLead;
+        }
+
+        $lead = Lead::create([
+            'social_links' => $this->normalizeSocialLinks(!empty($draftRow['social_links']) ? trim((string) $draftRow['social_links']) : null),
+            'created_by' => auth()->id(),
+            'lead_sheet_id' => $this->sheetFilter,
+            'lead_group_id' => $this->groupFilter ?: null,
+            'lead_date' => now()->toDateString(),
+            'status' => 'no response',
+            'name' => trim((string) ($draftRow['name'] ?? '')),
+            'email' => !empty($draftRow['email']) ? trim((string) $draftRow['email']) : null,
+            'services' => !empty($draftRow['services']) ? trim((string) $draftRow['services']) : null,
+            'phone' => !empty($draftRow['phone']) ? trim((string) $draftRow['phone']) : null,
+            'location' => !empty($draftRow['location']) ? trim((string) $draftRow['location']) : null,
+            'position' => !empty($draftRow['position']) ? trim((string) $draftRow['position']) : null,
+            'platform' => !empty($draftRow['platform']) ? trim((string) $draftRow['platform']) : null,
+            'detail' => !empty($draftRow['detail']) ? trim((string) $draftRow['detail']) : null,
+            'web_link' => !empty($draftRow['web_link']) ? trim((string) $draftRow['web_link']) : null,
+        ]);
+
+        $salesUsers = User::whereIn('role', ['sales', 'upsale', 'front_sale'])->get();
+
+        if ($salesUsers->isNotEmpty()) {
+            NotificationService::createForUsers(
+                $salesUsers,
+                $lead,
+                'new_lead',
+                "New lead '{$lead->name}' has been added by " . auth()->user()->name
+            );
+        }
+
+        return $lead;
+    }
+
+    protected function appendTableRows(array $incomingRows): void
+    {
+        if (empty($incomingRows)) {
             return;
         }
 
-        // If last row has a name but no ID yet (being created), wait for creation to complete
-        // Don't add empty row until the lead is fully created and has an ID
+        $persistedRows = $this->persistedTableRows();
+        $existingIds = array_map(static fn ($row) => (int) ($row['id'] ?? 0), $persistedRows);
+
+        foreach ($incomingRows as $row) {
+            $rowId = (int) ($row['id'] ?? 0);
+            if ($rowId === 0 || in_array($rowId, $existingIds, true)) {
+                continue;
+            }
+
+            $persistedRows[] = $row;
+            $existingIds[] = $rowId;
+        }
+
+        $this->leadsData = array_values($persistedRows);
+    }
+
+    protected function persistedTableRows(): array
+    {
+        return array_values(array_filter(
+            $this->leadsData,
+            static fn ($row) => !empty($row['id'])
+        ));
+    }
+
+    protected function persistedDraftLeadRows(): array
+    {
+        return array_values(array_filter(
+            $this->draftLeadRows,
+            static fn ($row) => !empty($row['id'])
+        ));
+    }
+
+    protected function visibleTableRecordCount(): int
+    {
+        return count($this->persistedTableRows()) + count($this->persistedDraftLeadRows());
+    }
+
+    protected function shouldAppendTableDraftRow(): bool
+    {
+        return $this->sheetFilter !== ''
+            && $this->sheetFilter !== null
+            && !$this->hasActiveTableFilters()
+            && $this->groupFilter !== ''
+            && $this->groupFilter !== null;
+    }
+
+    protected function ensureTrailingDraftRow(): void
+    {
+        if (!$this->shouldAppendTableDraftRow()) {
+            $this->draftLeadRows = [];
+            return;
+        }
+
+        $rows = [];
+        foreach ($this->draftLeadRows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $hasContent = collect(['name', 'email', 'services', 'phone', 'location', 'position', 'platform', 'social_links', 'detail', 'web_link'])
+                ->contains(fn ($field) => trim((string) ($row[$field] ?? '')) !== '');
+
+            if (!empty($row['id']) || $hasContent) {
+                $rows[] = $row;
+            }
+        }
+
+        $lastRow = end($rows);
+        if (!$lastRow || !empty($lastRow['id']) || collect(['name', 'email', 'services', 'phone', 'location', 'position', 'platform', 'social_links', 'detail', 'web_link'])
+            ->contains(fn ($field) => trim((string) ($lastRow[$field] ?? '')) !== '')) {
+            $rows[] = $this->emptyRow();
+        }
+
+        $this->draftLeadRows = array_values($rows);
     }
 
     public function emptyRow(): array
@@ -1634,28 +1783,6 @@ new class extends Component
         }
 
         return $row;
-    }
-
-    protected function buildFilteredTableRows(): array
-    {
-        if (!auth()->check() || !$this->canEditAcrossAllSheets() || !$this->hasActiveTableFilters()) {
-            return [];
-        }
-
-        $query = Lead::with(['leadSheet', 'leadGroup'])
-            ->where('created_by', auth()->id());
-
-        if ($this->sheetFilter) {
-            $query->where('lead_sheet_id', $this->sheetFilter);
-        }
-
-        $this->applyTableSearchAndStatusFilters($query);
-
-        return $query->orderBy('created_at', 'desc')
-            ->get()
-            ->map(fn ($lead) => $this->mapLeadToTableRow($lead, !$this->sheetFilter))
-            ->values()
-            ->all();
     }
 
     protected function applySelectedGroupScope($query): void
@@ -1870,9 +1997,6 @@ new class extends Component
             }
 
             $leads = $query->paginate(10);
-            $tableRows = ($this->viewMode === 'table' && $this->canEditAcrossAllSheets() && $this->hasActiveTableFilters())
-                ? $this->buildFilteredTableRows()
-                : [];
 
             $sheetsQuery = LeadSheet::with('teams')->orderBy('created_at', 'desc');
             if (auth()->check()) {
@@ -1896,7 +2020,7 @@ new class extends Component
 
             return view('components.leads.⚡index', [
                 'leads' => $leads,
-                'tableRows' => $tableRows,
+                'tableRows' => [],
                 'sheets' => $sheetsQuery->get(),
                 'groups' => $groups,
             ]);
@@ -1915,7 +2039,7 @@ new class extends Component
 
 <div
     class="max-w-9xl mx-auto px-4 sm:px-6 lg:px-8 py-6"
-    wire:poll.5s="refreshLeadsData"
+    @if($viewMode === 'list') wire:poll.15s="refreshLeadsData" @endif
     x-data="{ importModalOpen: false }"
     x-on:close-import-modal.window="importModalOpen = false"
     x-on:keydown.escape.window="importModalOpen = false"
@@ -2244,7 +2368,7 @@ new class extends Component
                         </thead>
                         @php
                             $isFilteredTableView = $this->hasActiveTableFilters();
-                            $tableDisplayRows = $isFilteredTableView ? $tableRows : $leadsData;
+                            $tableDisplayRows = $leadsData;
                         @endphp
                         <tbody class="bg-white divide-y divide-gray-200">
                             @forelse($tableDisplayRows as $index => $row)
@@ -2370,8 +2494,65 @@ new class extends Component
                                     </td>
                                 </tr>
                             @endforelse
+                            @if(!$isFilteredTableView && $this->shouldAppendTableDraftRow())
+                                @foreach($draftLeadRows as $draftIndex => $draftRow)
+                                    <tr wire:key="lead-draft-row-{{ $draftRow['_row_key'] ?? ('draft-' . $draftIndex) }}" class="bg-blue-50">
+                                        <td class="px-4 py-2">
+                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.name" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Name">
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <input type="email" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.email" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Email">
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.services" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Services">
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.phone" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Phone">
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.location" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Location">
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.position" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Position">
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.platform" class="w-32 px-2 py-1 border border-gray-300 rounded" placeholder="Platform">
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <textarea wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.social_links" class="w-56 px-2 py-1 border border-gray-300 rounded" rows="2" placeholder="Social links (LinkedIn, Facebook, Instagram)"></textarea>
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.detail" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Details">
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.web_link" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Web link">
+                                        </td>
+                                        <td class="px-4 py-2"></td>
+                                    </tr>
+                                @endforeach
+                            @endif
                         </tbody>
                     </table>
+                </div>
+                <div class="border-t border-gray-200 bg-gray-50 px-4 py-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <p class="text-sm text-gray-600">
+                        Loaded {{ $tableLoadedCount }} row{{ $tableLoadedCount === 1 ? '' : 's' }}
+                        @if($hasMoreTableRows)
+                            <span class="text-gray-500">. More rows are ready to stream in.</span>
+                        @endif
+                    </p>
+                    @if($hasMoreTableRows)
+                        <button
+                            type="button"
+                            wire:click="loadMoreTableRows"
+                            wire:loading.attr="disabled"
+                            wire:target="loadMoreTableRows"
+                            class="inline-flex items-center justify-center px-4 py-2 text-sm font-semibold text-blue-700 bg-white border border-blue-200 rounded-lg hover:bg-blue-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            <span wire:loading.remove wire:target="loadMoreTableRows">Load More Rows</span>
+                            <span wire:loading wire:target="loadMoreTableRows">Loading...</span>
+                        </button>
+                    @endif
                 </div>
             </div>
         @endif
