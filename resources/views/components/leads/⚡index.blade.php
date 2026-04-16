@@ -36,8 +36,11 @@ new class extends Component
     public $editingGroupId = null;
     public $editingGroupName = '';
     public $addGroupFormKey = 1;
+    public $tableStateSignature = '';
     private $rowUniqueIds = [];
     protected $queryString = [
+        'search' => ['except' => ''],
+        'statusFilter' => ['except' => ''],
         'sheetFilter' => ['except' => ''],
         'groupFilter' => ['except' => ''],
         'viewMode' => ['except' => 'table'],
@@ -51,6 +54,8 @@ new class extends Component
     public function updatedSearch()
     {
         if (auth()->check() && $this->viewMode === 'table' && $this->canEditAcrossAllSheets()) {
+            $this->pendingCreates = [];
+            $this->leadsData = [];
             $this->loadSheetLeads();
         }
     }
@@ -63,6 +68,8 @@ new class extends Component
     public function updatedStatusFilter()
     {
         if (auth()->check() && $this->viewMode === 'table' && $this->canEditAcrossAllSheets()) {
+            $this->pendingCreates = [];
+            $this->leadsData = [];
             $this->loadSheetLeads();
         }
     }
@@ -780,19 +787,23 @@ new class extends Component
                 return;
             }
 
-            $targetGroup = $this->resolveImportTargetGroup($sheet->id);
-
             $extension = strtolower($this->importFile->getClientOriginalExtension() ?: pathinfo($this->importFile->getClientOriginalName(), PATHINFO_EXTENSION));
             $reader = $this->createImportReader($extension);
             $reader->open($this->importFile->getRealPath());
             $readerOpened = true;
 
-            $headerMap = [];
-            $rowNumber = 0;
             $imported = 0;
             $skipped = 0;
+            $importedTabs = [];
+            $firstImportedGroupId = null;
+            $skippedWorksheets = [];
 
             foreach ($reader->getSheetIterator() as $sheetIterator) {
+                $headerMap = [];
+                $rowNumber = 0;
+                $targetGroup = null;
+                $worksheetName = $this->resolveImportWorksheetName($sheetIterator);
+
                 foreach ($sheetIterator->getRowIterator() as $row) {
                     $rowNumber++;
                     $rowValues = $row->toArray();
@@ -801,8 +812,8 @@ new class extends Component
                         $headerMap = $this->buildImportHeaderMap($rowValues);
 
                         if (!isset($headerMap['name'])) {
-                            $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Import file must contain a Name column.']);
-                            return;
+                            $skippedWorksheets[] = $worksheetName;
+                            break;
                         }
 
                         continue;
@@ -817,6 +828,12 @@ new class extends Component
                     if (empty($payload['name'])) {
                         $skipped++;
                         continue;
+                    }
+
+                    if (!$targetGroup) {
+                        $targetGroup = $this->resolveImportTargetGroupForWorksheet($sheet->id, $worksheetName);
+                        $importedTabs[$targetGroup->id] = $targetGroup->name;
+                        $firstImportedGroupId ??= (string) $targetGroup->id;
                     }
 
                     Lead::create([
@@ -841,18 +858,19 @@ new class extends Component
 
                     $imported++;
                 }
-
-                // Import only the first worksheet for now.
-                break;
             }
 
             if ($imported === 0) {
-                $this->dispatch('show-toast', ['type' => 'warning', 'message' => 'No rows were imported. Please check your file data.']);
+                $message = 'No rows were imported. Please check your file data.';
+                if (!empty($skippedWorksheets)) {
+                    $message .= ' Skipped tab(s) without a Name column: ' . implode(', ', $skippedWorksheets) . '.';
+                }
+                $this->dispatch('show-toast', ['type' => 'warning', 'message' => $message]);
                 return;
             }
 
             $this->sheetFilter = (string) $sheet->id;
-            $this->groupFilter = (string) $targetGroup->id;
+            $this->groupFilter = $firstImportedGroupId;
             $this->importSheetId = (string) $sheet->id;
             $this->importFile = null;
             $this->resetValidation(['importFile', 'importSheetId']);
@@ -865,8 +883,14 @@ new class extends Component
             $this->dispatch('close-import-modal');
 
             $message = "Imported {$imported} lead(s) successfully.";
+            if (!empty($importedTabs)) {
+                $message .= ' Created/updated ' . count($importedTabs) . ' tab(s): ' . implode(', ', array_values($importedTabs)) . '.';
+            }
             if ($skipped > 0) {
                 $message .= " Skipped {$skipped} row(s) without a name.";
+            }
+            if (!empty($skippedWorksheets)) {
+                $message .= ' Skipped worksheet tab(s) without a Name column: ' . implode(', ', $skippedWorksheets) . '.';
             }
 
             $this->dispatch('show-toast', ['type' => 'success', 'message' => $message]);
@@ -893,34 +917,46 @@ new class extends Component
         };
     }
 
-    protected function resolveImportTargetGroup(int $sheetId): LeadGroup
+    protected function resolveImportTargetGroupForWorksheet(int $sheetId, ?string $worksheetName): LeadGroup
     {
-        if ($this->sheetFilter && (int) $this->sheetFilter === $sheetId && $this->groupFilter) {
-            $selectedGroup = LeadGroup::where('id', (int) $this->groupFilter)
-                ->where('lead_sheet_id', $sheetId)
-                ->first();
+        $groupName = $this->normalizeImportWorksheetGroupName($worksheetName);
 
-            if ($selectedGroup) {
-                return $selectedGroup;
-            }
-        }
-
-        $firstGroup = LeadGroup::where('lead_sheet_id', $sheetId)
-            ->orderBy('sort_order')
-            ->orderBy('name')
+        $existingGroup = LeadGroup::where('lead_sheet_id', $sheetId)
+            ->whereRaw('LOWER(name) = ?', [mb_strtolower($groupName)])
             ->first();
 
-        if ($firstGroup) {
-            return $firstGroup;
+        if ($existingGroup) {
+            return $existingGroup;
         }
 
         $nextSortOrder = (LeadGroup::where('lead_sheet_id', $sheetId)->max('sort_order') ?? 0) + 1;
 
         return LeadGroup::create([
             'lead_sheet_id' => $sheetId,
-            'name' => 'Imported',
+            'name' => $groupName,
             'sort_order' => $nextSortOrder,
         ]);
+    }
+
+    protected function resolveImportWorksheetName(mixed $sheetIterator): string
+    {
+        $name = method_exists($sheetIterator, 'getName')
+            ? (string) $sheetIterator->getName()
+            : '';
+
+        return $this->normalizeImportWorksheetGroupName($name);
+    }
+
+    protected function normalizeImportWorksheetGroupName(?string $worksheetName): string
+    {
+        $name = trim((string) ($worksheetName ?? ''));
+        if ($name === '') {
+            return 'Imported';
+        }
+
+        $name = preg_replace('/\s+/', ' ', $name) ?? $name;
+
+        return mb_substr($name, 0, 255);
     }
 
     protected function buildImportHeaderMap(array $headerRow): array
@@ -951,7 +987,7 @@ new class extends Component
 
     protected function mapImportHeaderToField(string $normalizedHeader): ?string
     {
-        return match ($normalizedHeader) {
+        $exactMatch = match ($normalizedHeader) {
             'name', 'fullname', 'leadname' => 'name',
             'email', 'emailaddress' => 'email',
             'phone', 'phoneno', 'phonenumber', 'mobile', 'mobileno' => 'phone',
@@ -960,14 +996,43 @@ new class extends Component
             'location', 'city', 'country', 'address' => 'location',
             'position', 'designation', 'jobtitle', 'role' => 'position',
             'platform', 'source', 'leadsource' => 'platform',
-            'linkedin', 'linkedinurl', 'linkedinprofile', 'links', 'link', 'sociallink', 'sociallinks', 'facebooklink', 'facebookurl', 'instagramlink', 'instagramurl', 'instalink', 'instaurl' => 'social_links',
+            'linkedin', 'linkedinurl', 'linkedinprofile', 'linkedinlink', 'linkedinlinks',
+            'linkedn', 'linkednurl', 'linkednlink', 'linkdin', 'linkdinurl', 'linkdinlink',
+            'social', 'sociallink', 'sociallinks', 'socialmedia', 'socialmedialink', 'socialmedialinks',
+            'links', 'link',
+            'facebook', 'facebooklink', 'facebooklinks', 'facebookurl', 'facebookprofile',
+            'fb', 'fblink', 'fblinks', 'fburl', 'fbprofile', 'fblinkurl',
+            'instagram', 'instagramlink', 'instagramlinks', 'instagramurl', 'instagramprofile',
+            'insta', 'instalink', 'instalinks', 'instaurl', 'instaprofile',
+            'twitter', 'twitterlink', 'twitterlinks', 'twitterurl', 'twitterprofile',
+            'x', 'xlink', 'xlinks', 'xurl', 'xprofile',
+            'youtube', 'youtubelink', 'youtubeurl',
+            'tiktok', 'tiktoklink', 'tiktokurl',
+            'snapchat', 'snapchatlink', 'snapchaturl',
+            'telegram', 'telegramlink', 'telegramurl',
+            'whatsapp', 'whatsapplink', 'whatsappurl',
+            'pinterest', 'pinterestlink', 'pinteresturl' => 'social_links',
             'detail', 'details', 'description', 'budgetotherdetail', 'budgetotherdetails', 'otherdetail', 'otherdetails' => 'detail',
-            'weblink', 'websitelink', 'weburl', 'website', 'websiteurl', 'url' => 'web_link',
+            'weblink', 'websitelink', 'weburl', 'website', 'websiteurl', 'web', 'url', 'site', 'siteurl', 'homepage', 'homepagelink', 'companywebsite', 'companyweb', 'companyurl' => 'web_link',
             'notes', 'note', 'comment', 'comments' => 'notes',
             'leaddate', 'date' => 'lead_date',
             'status' => 'status',
             default => null,
         };
+
+        if ($exactMatch !== null) {
+            return $exactMatch;
+        }
+
+        if ($this->headerLooksLikeSocialLinks($normalizedHeader)) {
+            return 'social_links';
+        }
+
+        if ($this->headerLooksLikeWebLink($normalizedHeader)) {
+            return 'web_link';
+        }
+
+        return null;
     }
 
     protected function normalizeImportHeader(mixed $header): string
@@ -976,6 +1041,111 @@ new class extends Component
         $stringHeader = strtolower(trim($stringHeader));
 
         return preg_replace('/[^a-z0-9]+/', '', $stringHeader) ?? '';
+    }
+
+    protected function headerLooksLikeSocialLinks(string $normalizedHeader): bool
+    {
+        if ($normalizedHeader === '') {
+            return false;
+        }
+
+        $aliases = [
+            'social', 'sociallink', 'sociallinks', 'socialmedia', 'socialmedialink', 'socialmedialinks',
+            'facebook', 'facebooklink', 'facebooklinks', 'facebookurl', 'facebookprofile',
+            'fb', 'fblink', 'fblinks', 'fburl', 'fbprofile', 'fblinkurl', 'fbsocial',
+            'instagram', 'instagramlink', 'instagramlinks', 'instagramurl', 'instagramprofile',
+            'insta', 'instalink', 'instalinks', 'instaurl', 'instaprofile', 'instgramlink',
+            'linkedin', 'linkedinlink', 'linkedinlinks', 'linkedinurl', 'linkedinprofile',
+            'linkedn', 'linkednlink', 'linkednurl', 'linkdin', 'linkdinlink', 'linkdinurl',
+            'twitter', 'twitterlink', 'twitterlinks', 'twitterurl', 'twitterprofile',
+            'xlink', 'xlinks', 'xurl', 'xprofile',
+            'youtube', 'youtubelink', 'youtubeurl',
+            'tiktok', 'tiktoklink', 'tiktokurl',
+            'snapchat', 'snapchatlink', 'snapchaturl',
+            'telegram', 'telegramlink', 'telegramurl',
+            'whatsapp', 'whatsapplink', 'whatsappurl',
+            'pinterest', 'pinterestlink', 'pinteresturl',
+        ];
+
+        if ($this->headerMatchesAnyAlias($normalizedHeader, $aliases, 2)) {
+            return true;
+        }
+
+        $platformKeywords = [
+            'social', 'facebook', 'fb', 'instagram', 'insta', 'instagrm', 'linkedin', 'linkedn', 'linkdin',
+            'twitter', 'tweet', 'youtube', 'tiktok', 'snapchat', 'telegram', 'whatsapp', 'pinterest',
+        ];
+        $linkKeywords = ['link', 'links', 'url', 'urls', 'profile', 'profiles', 'handle', 'handles'];
+
+        foreach ($platformKeywords as $platformKeyword) {
+            if (str_contains($normalizedHeader, $platformKeyword)) {
+                foreach ($linkKeywords as $linkKeyword) {
+                    if (str_contains($normalizedHeader, $linkKeyword)) {
+                        return true;
+                    }
+                }
+
+                if (in_array($platformKeyword, ['facebook', 'fb', 'instagram', 'insta', 'linkedin', 'linkedn', 'linkdin', 'twitter', 'youtube', 'tiktok', 'snapchat', 'telegram', 'whatsapp', 'pinterest'], true)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    protected function headerLooksLikeWebLink(string $normalizedHeader): bool
+    {
+        if ($normalizedHeader === '') {
+            return false;
+        }
+
+        $aliases = [
+            'web', 'weblink', 'weblinks', 'weburl', 'weburls',
+            'website', 'websites', 'websitelink', 'websitelinks', 'websiteurl', 'websiteurls',
+            'site', 'sitelink', 'siteurl', 'homepage', 'homepagelink', 'homepageurl',
+            'companywebsite', 'companyweb', 'companyurl',
+        ];
+
+        if ($this->headerMatchesAnyAlias($normalizedHeader, $aliases, 2)) {
+            return true;
+        }
+
+        $webKeywords = ['web', 'website', 'site', 'homepage'];
+        $linkKeywords = ['link', 'links', 'url', 'urls'];
+
+        foreach ($webKeywords as $webKeyword) {
+            if (str_contains($normalizedHeader, $webKeyword)) {
+                return true;
+            }
+        }
+
+        foreach ($linkKeywords as $linkKeyword) {
+            if (str_contains($normalizedHeader, $linkKeyword) && str_contains($normalizedHeader, 'web')) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    protected function headerMatchesAnyAlias(string $normalizedHeader, array $aliases, int $maxDistance = 2): bool
+    {
+        foreach ($aliases as $alias) {
+            if ($normalizedHeader === $alias) {
+                return true;
+            }
+
+            if (strlen($alias) >= 5 && (str_contains($normalizedHeader, $alias) || str_contains($alias, $normalizedHeader))) {
+                return true;
+            }
+
+            if (min(strlen($normalizedHeader), strlen($alias)) >= 5 && levenshtein($normalizedHeader, $alias) <= $maxDistance) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     protected function buildLeadPayloadFromImportRow(array $rowValues, array $headerMap): array
@@ -1343,7 +1513,7 @@ new class extends Component
                 return;
             }
 
-            if ($this->groupFilter === '' || $this->groupFilter === null) {
+            if (($this->groupFilter === '' || $this->groupFilter === null) && !$this->hasActiveTableFilters()) {
                 $this->leadsData = [];
                 return;
             }
@@ -1351,7 +1521,9 @@ new class extends Component
             $leadsQuery = Lead::where('created_by', auth()->id())
                 ->where('lead_sheet_id', $this->sheetFilter);
             $this->applyTableSearchAndStatusFilters($leadsQuery);
-            $this->applySelectedGroupScope($leadsQuery);
+            if ($this->shouldApplySelectedGroupScopeToTableQuery()) {
+                $this->applySelectedGroupScope($leadsQuery);
+            }
             $this->leadsData = $leadsQuery->orderBy('created_at', 'desc')
                 ->get()
                 ->map(function ($lead) {
@@ -1373,7 +1545,9 @@ new class extends Component
                 ->values()
                 ->all();
 
-            $this->ensureEmptyRow();
+            if (!$this->hasActiveTableFilters()) {
+                $this->ensureEmptyRow();
+            }
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::error('Error loading sheet leads: ' . $e->getMessage());
             $this->leadsData = [$this->emptyRow()];
@@ -1437,6 +1611,53 @@ new class extends Component
         return (string) $value;
     }
 
+    protected function mapLeadToTableRow(Lead $lead, bool $includeContext = false): array
+    {
+        $row = [
+            '_row_key' => 'lead-'.$lead->id,
+            'id' => $lead->id,
+            'name' => $lead->name ?? '',
+            'email' => $lead->email ?? '',
+            'services' => $lead->services ?? '',
+            'phone' => $lead->phone ?? '',
+            'location' => $lead->location ?? '',
+            'position' => $lead->position ?? '',
+            'platform' => $lead->platform ?? '',
+            'social_links' => $this->resolveLeadSocialLinks($lead),
+            'detail' => $lead->detail ?? '',
+            'web_link' => $lead->web_link ?? '',
+        ];
+
+        if ($includeContext) {
+            $row['sheet_name'] = $lead->leadSheet?->name ?? '';
+            $row['group_name'] = $lead->leadGroup?->name ?? 'Ungrouped';
+        }
+
+        return $row;
+    }
+
+    protected function buildFilteredTableRows(): array
+    {
+        if (!auth()->check() || !$this->canEditAcrossAllSheets() || !$this->hasActiveTableFilters()) {
+            return [];
+        }
+
+        $query = Lead::with(['leadSheet', 'leadGroup'])
+            ->where('created_by', auth()->id());
+
+        if ($this->sheetFilter) {
+            $query->where('lead_sheet_id', $this->sheetFilter);
+        }
+
+        $this->applyTableSearchAndStatusFilters($query);
+
+        return $query->orderBy('created_at', 'desc')
+            ->get()
+            ->map(fn ($lead) => $this->mapLeadToTableRow($lead, !$this->sheetFilter))
+            ->values()
+            ->all();
+    }
+
     protected function applySelectedGroupScope($query): void
     {
         if ($this->groupFilter !== '' && $this->groupFilter !== null) {
@@ -1471,6 +1692,59 @@ new class extends Component
         if ($this->statusFilter) {
             $query->where('status', $this->statusFilter);
         }
+    }
+
+    protected function hasActiveTableFilters(): bool
+    {
+        return trim((string) $this->search) !== '' || trim((string) $this->statusFilter) !== '';
+    }
+
+    protected function shouldApplySelectedGroupScopeToTableQuery(): bool
+    {
+        if ($this->groupFilter === '' || $this->groupFilter === null) {
+            return false;
+        }
+
+        return !$this->hasActiveTableFilters();
+    }
+
+    protected function shouldRequireSelectedGroupForTableView(): bool
+    {
+        return !$this->hasActiveTableFilters();
+    }
+
+    protected function currentTableStateSignature(): string
+    {
+        return md5(json_encode([
+            'viewMode' => $this->viewMode,
+            'search' => trim((string) $this->search),
+            'statusFilter' => trim((string) $this->statusFilter),
+            'sheetFilter' => (string) $this->sheetFilter,
+            'groupFilter' => (string) $this->groupFilter,
+        ]));
+    }
+
+    protected function currentLeadsPageQueryParams(): array
+    {
+        $params = [];
+
+        if ($this->search !== '') {
+            $params['search'] = $this->search;
+        }
+        if ($this->statusFilter !== '') {
+            $params['statusFilter'] = $this->statusFilter;
+        }
+        if ($this->sheetFilter !== '') {
+            $params['sheetFilter'] = $this->sheetFilter;
+        }
+        if ($this->groupFilter !== '' && $this->groupFilter !== null) {
+            $params['groupFilter'] = $this->groupFilter;
+        }
+        if ($this->viewMode !== '') {
+            $params['viewMode'] = $this->viewMode;
+        }
+
+        return $params;
     }
 
     public function mount()
@@ -1524,14 +1798,20 @@ new class extends Component
                 $this->viewMode = 'list';
             }
 
-            if (auth()->check() && $this->viewMode === 'table' && empty($this->leadsData)) {
-                if (!$this->sheetFilter && $this->canEditAcrossAllSheets()) {
-                    $this->loadSheetLeads();
-                } elseif ($this->sheetFilter) {
-                    $currentSheet = LeadSheet::find($this->sheetFilter);
-                    if ($currentSheet && $currentSheet->created_by === auth()->id() && $this->canEditAcrossAllSheets()) {
+            if (auth()->check() && $this->viewMode === 'table' && $this->canEditAcrossAllSheets()) {
+                $currentTableStateSignature = $this->currentTableStateSignature();
+
+                if ($this->tableStateSignature !== $currentTableStateSignature) {
+                    if (!$this->sheetFilter) {
                         $this->loadSheetLeads();
+                    } else {
+                        $currentSheet = LeadSheet::find($this->sheetFilter);
+                        if ($currentSheet && $currentSheet->created_by === auth()->id()) {
+                            $this->loadSheetLeads();
+                        }
                     }
+
+                    $this->tableStateSignature = $currentTableStateSignature;
                 }
             }
 
@@ -1590,6 +1870,9 @@ new class extends Component
             }
 
             $leads = $query->paginate(10);
+            $tableRows = ($this->viewMode === 'table' && $this->canEditAcrossAllSheets() && $this->hasActiveTableFilters())
+                ? $this->buildFilteredTableRows()
+                : [];
 
             $sheetsQuery = LeadSheet::with('teams')->orderBy('created_at', 'desc');
             if (auth()->check()) {
@@ -1613,6 +1896,7 @@ new class extends Component
 
             return view('components.leads.⚡index', [
                 'leads' => $leads,
+                'tableRows' => $tableRows,
                 'sheets' => $sheetsQuery->get(),
                 'groups' => $groups,
             ]);
@@ -1620,6 +1904,7 @@ new class extends Component
             \Illuminate\Support\Facades\Log::error('Error rendering leads index: ' . $e->getMessage());
             return view('components.leads.⚡index', [
                 'leads' => \Illuminate\Pagination\LengthAwarePaginator::empty(),
+                'tableRows' => [],
                 'sheets' => collect([]),
                 'groups' => collect([]),
             ]);
@@ -1888,14 +2173,22 @@ new class extends Component
         <div class="mb-4 flex justify-end">
             <div class="inline-flex rounded-lg border border-gray-300 bg-white shadow-sm">
                 @php
-                    $queryParams = request()->query();
-                    $queryParams['viewMode'] = 'table';
-                    if (!isset($queryParams['sheetFilter']) && $sheetFilter) {
-                        $queryParams['sheetFilter'] = $sheetFilter;
+                    $tableQueryParams = ['viewMode' => 'table'];
+                    if ($search !== '') {
+                        $tableQueryParams['search'] = $search;
+                    }
+                    if ($statusFilter !== '') {
+                        $tableQueryParams['statusFilter'] = $statusFilter;
+                    }
+                    if ($sheetFilter !== '') {
+                        $tableQueryParams['sheetFilter'] = $sheetFilter;
+                    }
+                    if ($groupFilter !== '' && $groupFilter !== null) {
+                        $tableQueryParams['groupFilter'] = $groupFilter;
                     }
                 @endphp
                 <a 
-                    href="{{ route('leads.index', $queryParams) }}"
+                    href="{{ route('leads.index', $tableQueryParams) }}"
                     class="px-4 py-2 text-sm font-semibold rounded-l-lg transition-colors {{ $viewMode === 'table' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-50' }}"
                 >
                     <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1904,10 +2197,11 @@ new class extends Component
                     Table View
                 </a>
                 @php
-                    $queryParams['viewMode'] = 'list';
+                    $listQueryParams = $tableQueryParams;
+                    $listQueryParams['viewMode'] = 'list';
                 @endphp
                 <a 
-                    href="{{ route('leads.index', $queryParams) }}"
+                    href="{{ route('leads.index', $listQueryParams) }}"
                     class="px-4 py-2 text-sm font-semibold rounded-r-lg transition-colors {{ $viewMode === 'list' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-50' }}"
                 >
                     <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1921,7 +2215,7 @@ new class extends Component
 
     <!-- Leads Table View -->
     @if(($canUseTableView || $canEditAllSheetsTable) && $viewMode === 'table')
-        @if($sheetFilter && ($groupFilter === '' || $groupFilter === null))
+        @if($sheetFilter && ($groupFilter === '' || $groupFilter === null) && $this->shouldRequireSelectedGroupForTableView())
             <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 text-center text-gray-600">
                 Select or create a tab/group to start adding leads in this sheet.
             </div>
@@ -1948,14 +2242,18 @@ new class extends Component
                                 <th class="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Actions</th>
                             </tr>
                         </thead>
+                        @php
+                            $isFilteredTableView = $this->hasActiveTableFilters();
+                            $tableDisplayRows = $isFilteredTableView ? $tableRows : $leadsData;
+                        @endphp
                         <tbody class="bg-white divide-y divide-gray-200">
-                            @forelse($leadsData as $index => $row)
+                            @forelse($tableDisplayRows as $index => $row)
                                 @php
                                     $rowKey = $row['_row_key'] ?? ('idx-' . $index);
                                 @endphp
                                 <tr
                                     wire:key="lead-row-{{ $rowKey }}"
-                                    class="{{ empty($row['id']) ? 'bg-blue-50' : 'hover:bg-gray-50' }}"
+                                    class="{{ !$isFilteredTableView && empty($row['id']) ? 'bg-blue-50' : 'hover:bg-gray-50' }}"
                                 >
                                     @if(!$sheetFilter)
                                         <td class="px-4 py-2 text-sm text-gray-700 whitespace-nowrap">
@@ -1966,44 +2264,102 @@ new class extends Component
                                         </td>
                                     @endif
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:key="lead-name-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.name" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Name">
+                                        @if($isFilteredTableView)
+                                            <input type="text" value="{{ $row['name'] ?? '' }}" readonly class="w-48 px-2 py-1 border border-gray-200 bg-gray-50 rounded text-gray-700">
+                                        @else
+                                            <input type="text" wire:key="lead-name-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.name" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Name">
+                                        @endif
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="email" wire:key="lead-email-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.email" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Email">
+                                        @if($isFilteredTableView)
+                                            <input type="text" value="{{ $row['email'] ?? '' }}" readonly class="w-56 px-2 py-1 border border-gray-200 bg-gray-50 rounded text-gray-700">
+                                        @else
+                                            <input type="email" wire:key="lead-email-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.email" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Email">
+                                        @endif
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:key="lead-services-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.services" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Services">
+                                        @if($isFilteredTableView)
+                                            <input type="text" value="{{ $row['services'] ?? '' }}" readonly class="w-40 px-2 py-1 border border-gray-200 bg-gray-50 rounded text-gray-700">
+                                        @else
+                                            <input type="text" wire:key="lead-services-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.services" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Services">
+                                        @endif
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:key="lead-phone-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.phone" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Phone">
+                                        @if($isFilteredTableView)
+                                            <input type="text" value="{{ $row['phone'] ?? '' }}" readonly class="w-40 px-2 py-1 border border-gray-200 bg-gray-50 rounded text-gray-700">
+                                        @else
+                                            <input type="text" wire:key="lead-phone-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.phone" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Phone">
+                                        @endif
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:key="lead-location-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.location" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Location">
+                                        @if($isFilteredTableView)
+                                            <input type="text" value="{{ $row['location'] ?? '' }}" readonly class="w-40 px-2 py-1 border border-gray-200 bg-gray-50 rounded text-gray-700">
+                                        @else
+                                            <input type="text" wire:key="lead-location-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.location" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Location">
+                                        @endif
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:key="lead-position-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.position" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Position">
+                                        @if($isFilteredTableView)
+                                            <input type="text" value="{{ $row['position'] ?? '' }}" readonly class="w-40 px-2 py-1 border border-gray-200 bg-gray-50 rounded text-gray-700">
+                                        @else
+                                            <input type="text" wire:key="lead-position-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.position" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Position">
+                                        @endif
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:key="lead-platform-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.platform" class="w-32 px-2 py-1 border border-gray-300 rounded" placeholder="Platform">
+                                        @if($isFilteredTableView)
+                                            <input type="text" value="{{ $row['platform'] ?? '' }}" readonly class="w-32 px-2 py-1 border border-gray-200 bg-gray-50 rounded text-gray-700">
+                                        @else
+                                            <input type="text" wire:key="lead-platform-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.platform" class="w-32 px-2 py-1 border border-gray-300 rounded" placeholder="Platform">
+                                        @endif
                                     </td>
                                     <td class="px-4 py-2">
-                                        <textarea wire:key="lead-social-links-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.social_links" class="w-56 px-2 py-1 border border-gray-300 rounded" rows="2" placeholder="Social links (LinkedIn, Facebook, Instagram)"></textarea>
+                                        @if($isFilteredTableView)
+                                            <textarea readonly class="w-56 px-2 py-1 border border-gray-200 bg-gray-50 rounded text-gray-700" rows="2">{{ $row['social_links'] ?? '' }}</textarea>
+                                        @else
+                                            <textarea wire:key="lead-social-links-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.social_links" class="w-56 px-2 py-1 border border-gray-300 rounded" rows="2" placeholder="Social links (LinkedIn, Facebook, Instagram)"></textarea>
+                                        @endif
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:key="lead-detail-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.detail" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Details">
+                                        @if($isFilteredTableView)
+                                            <input type="text" value="{{ $row['detail'] ?? '' }}" readonly class="w-56 px-2 py-1 border border-gray-200 bg-gray-50 rounded text-gray-700">
+                                        @else
+                                            <input type="text" wire:key="lead-detail-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.detail" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Details">
+                                        @endif
                                     </td>
                                     <td class="px-4 py-2">
-                                        <input type="text" wire:key="lead-web-link-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.web_link" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Web link">
+                                        @if($isFilteredTableView)
+                                            <input type="text" value="{{ $row['web_link'] ?? '' }}" readonly class="w-48 px-2 py-1 border border-gray-200 bg-gray-50 rounded text-gray-700">
+                                        @else
+                                            <input type="text" wire:key="lead-web-link-{{ $rowKey }}" wire:model.live.debounce.500ms="leadsData.{{ $index }}.web_link" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Web link">
+                                        @endif
                                     </td>
                                     <td class="px-4 py-2">
                                         @if(!empty($row['id']))
-                                            <button
-                                                type="button"
-                                                class="px-3 py-1 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 rounded"
-                                                onclick="event.stopPropagation(); if(confirm('Delete this lead?')) { @this.call('deleteLeadRow', {{ $row['id'] }}) }"
-                                            >
-                                                Delete
-                                            </button>
+                                            @if($isFilteredTableView)
+                                                <div class="flex items-center gap-2">
+                                                    <a
+                                                        href="{{ route('leads.show', ['id' => $row['id'], 'return_to' => route('leads.index', $this->currentLeadsPageQueryParams())]) }}"
+                                                        class="px-3 py-1 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 rounded"
+                                                    >
+                                                        View
+                                                    </a>
+                                                    <button
+                                                        type="button"
+                                                        class="px-3 py-1 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 rounded"
+                                                        onclick="event.stopPropagation(); if(confirm('Delete this lead?')) { @this.call('deleteLeadRow', {{ $row['id'] }}) }"
+                                                    >
+                                                        Delete
+                                                    </button>
+                                                </div>
+                                            @else
+                                                <button
+                                                    type="button"
+                                                    class="px-3 py-1 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 rounded"
+                                                    onclick="event.stopPropagation(); if(confirm('Delete this lead?')) { @this.call('deleteLeadRow', {{ $row['id'] }}) }"
+                                                >
+                                                    Delete
+                                                </button>
+                                            @endif
                                         @endif
                                     </td>
                                 </tr>
@@ -2044,7 +2400,7 @@ new class extends Component
                                             {{ strtoupper(substr($lead->name, 0, 1)) }}
                                         </div>
                                         <div>
-                                            <a href="{{ route('leads.show', $lead->id) }}" class="text-sm font-semibold text-gray-900 hover:text-blue-600 transition-colors">
+                                            <a href="{{ route('leads.show', ['id' => $lead->id, 'return_to' => route('leads.index', $this->currentLeadsPageQueryParams())]) }}" class="text-sm font-semibold text-gray-900 hover:text-blue-600 transition-colors">
                                                 {{ $lead->name }}
                                             </a>
                                             <div class="text-xs text-gray-500">{{ $lead->lead_date?->format('M d, Y') ?? '—' }}</div>
@@ -2083,7 +2439,7 @@ new class extends Component
                                     <div class="text-xs text-gray-500">{{ $lead->created_at->format('M d, Y') }}</div>
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap">
-                                    <a href="{{ route('leads.show', $lead->id) }}" class="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors">
+                                    <a href="{{ route('leads.show', ['id' => $lead->id, 'return_to' => route('leads.index', $this->currentLeadsPageQueryParams())]) }}" class="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors">
                                         View
                                         <svg class="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
@@ -2134,7 +2490,7 @@ new class extends Component
                                         <div class="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold text-sm mr-3">
                                             {{ strtoupper(substr($lead->name, 0, 1)) }}
                                         </div>
-                                        <a href="{{ route('leads.show', $lead->id) }}" class="text-sm font-semibold text-gray-900 hover:text-blue-600 transition-colors">
+                                        <a href="{{ route('leads.show', ['id' => $lead->id, 'return_to' => route('leads.index', $this->currentLeadsPageQueryParams())]) }}" class="text-sm font-semibold text-gray-900 hover:text-blue-600 transition-colors">
                                             {{ $lead->name }}
                                         </a>
                                     </div>
@@ -2183,7 +2539,7 @@ new class extends Component
                                     <div class="text-xs text-gray-500">{{ $lead->created_at->format('M d, Y') }}</div>
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap">
-                                    <a href="{{ route('leads.show', $lead->id) }}" class="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors">
+                                    <a href="{{ route('leads.show', ['id' => $lead->id, 'return_to' => route('leads.index', $this->currentLeadsPageQueryParams())]) }}" class="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors">
                                         View
                                         <svg class="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
@@ -2234,7 +2590,7 @@ new class extends Component
                                         <div class="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold text-sm mr-3">
                                             {{ strtoupper(substr($lead->name, 0, 1)) }}
                                         </div>
-                                        <a href="{{ route('leads.show', $lead->id) }}" class="text-sm font-semibold text-gray-900 hover:text-blue-600 transition-colors">
+                                        <a href="{{ route('leads.show', ['id' => $lead->id, 'return_to' => route('leads.index', $this->currentLeadsPageQueryParams())]) }}" class="text-sm font-semibold text-gray-900 hover:text-blue-600 transition-colors">
                                             {{ $lead->name }}
                                         </a>
                                     </div>
@@ -2283,7 +2639,7 @@ new class extends Component
                                     <div class="text-xs text-gray-500">{{ $lead->created_at->format('M d, Y') }}</div>
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap">
-                                    <a href="{{ route('leads.show', $lead->id) }}" class="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors">
+                                    <a href="{{ route('leads.show', ['id' => $lead->id, 'return_to' => route('leads.index', $this->currentLeadsPageQueryParams())]) }}" class="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors">
                                         View
                                         <svg class="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
