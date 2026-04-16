@@ -12,11 +12,13 @@ new class extends Component
     public $leadId;
     public $lead;
     public $commentMessage = '';
+    public $returnTo = '';
 
     public function mount($id)
     {
         try {
             $this->leadId = $id;
+            $this->returnTo = $this->sanitizeReturnTo(request()->query('return_to'));
             $this->loadLead();
             
             if (!$this->lead) {
@@ -35,7 +37,7 @@ new class extends Component
                     $this->dispatch('notification-created');
                 }
                 session()->flash('message', 'Lead removed.');
-                $this->redirect(route('dashboard'));
+                $this->redirect($this->returnToDashboardOrLeads());
                 return;
             }
 
@@ -91,14 +93,54 @@ new class extends Component
             // When lead was removed from DB while user had it open: session message + redirect (no 404)
             if (!$this->lead) {
                 session()->flash('message', 'Lead removed.');
-                $this->redirect(route('dashboard'));
+                $this->redirect($this->returnToDashboardOrLeads());
             }
         } catch (\Throwable $e) {
             \Illuminate\Support\Facades\Log::error('Error loading lead: ' . $e->getMessage());
             $this->lead = null;
             session()->flash('message', 'Lead removed.');
-            $this->redirect(route('dashboard'));
+            $this->redirect($this->returnToDashboardOrLeads());
         }
+    }
+
+    protected function sanitizeReturnTo(?string $returnTo): string
+    {
+        $fallback = route('leads.index');
+        $returnTo = trim((string) $returnTo);
+
+        if ($returnTo === '') {
+            return $fallback;
+        }
+
+        if (str_starts_with($returnTo, '/')) {
+            return url($returnTo);
+        }
+
+        $returnParts = parse_url($returnTo);
+        $appParts = parse_url(url('/'));
+
+        if (($returnParts['host'] ?? null) !== ($appParts['host'] ?? null)) {
+            return $fallback;
+        }
+
+        $returnScheme = strtolower((string) ($returnParts['scheme'] ?? ''));
+        $appScheme = strtolower((string) ($appParts['scheme'] ?? ''));
+        if ($returnScheme !== '' && $appScheme !== '' && $returnScheme !== $appScheme) {
+            return $fallback;
+        }
+
+        $returnPort = (int) ($returnParts['port'] ?? 0);
+        $appPort = (int) ($appParts['port'] ?? 0);
+        if ($returnPort !== 0 && $appPort !== 0 && $returnPort !== $appPort) {
+            return $fallback;
+        }
+
+        return $returnTo;
+    }
+
+    protected function returnToDashboardOrLeads(): string
+    {
+        return $this->returnTo !== '' ? $this->returnTo : route('leads.index');
     }
 
     #[On('lead-opened')]
@@ -160,7 +202,7 @@ new class extends Component
             $this->loadLead();
             if (!$this->lead) {
                 session()->flash('message', 'Lead removed.');
-                return $this->redirect(route('dashboard'));
+                return $this->redirect($this->returnToDashboardOrLeads());
             }
 
             if (!auth()->user()->isSalesTeam() && !auth()->user()->isAdmin()) {
@@ -183,7 +225,7 @@ new class extends Component
             session()->flash('message', 'Lead status updated successfully!');
             
             // Redirect to leads index page with success message
-            return $this->redirect(route('leads.index'));
+            return $this->redirect($this->returnToDashboardOrLeads());
             
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::error('Error updating lead status: ' . $e->getMessage());
@@ -202,7 +244,7 @@ new class extends Component
             $this->loadLead();
             if (!$this->lead) {
                 session()->flash('message', 'Lead removed.');
-                return $this->redirect(route('dashboard'));
+                return $this->redirect($this->returnToDashboardOrLeads());
             }
 
             if (!auth()->user()->isSalesTeam()) {
@@ -240,7 +282,7 @@ new class extends Component
             // If lead was removed from DB, loadLead() redirects; otherwise ensure we never render 404
             if (!$this->lead) {
                 session()->flash('message', 'Lead removed.');
-                $this->redirect(route('dashboard'));
+                $this->redirect($this->returnToDashboardOrLeads());
             }
         }
         return view('components.leads.⚡show');
@@ -250,7 +292,7 @@ new class extends Component
 <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-6" wire:poll.3s="loadLead">
     @if(!$lead)
         <!-- Lead removed (e.g. front_sale cleared name = lead deleted): show message and redirect – never 404 -->
-        <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden" x-data="{ countdown: 2 }" x-init="setInterval(() => { if (countdown > 0) countdown--; else window.location = '{{ route('dashboard') }}'; }, 1000)">
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden" x-data="{ countdown: 2 }" x-init="setInterval(() => { if (countdown > 0) countdown--; else window.location = '{{ $this->returnToDashboardOrLeads() }}'; }, 1000)">
             <div class="p-8 sm:p-12 text-center">
                 <div class="w-16 h-16 mx-auto mb-4 rounded-full bg-amber-100 flex items-center justify-center">
                     <svg class="w-8 h-8 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -260,7 +302,7 @@ new class extends Component
                 <h1 class="text-xl font-bold text-gray-900 mb-2">Lead removed</h1>
                 <p class="text-gray-600 mb-2 max-w-md mx-auto">This lead has been removed by the person who created it.</p>
                 <p class="text-sm text-gray-500 mb-6">Redirecting you to the dashboard in <span x-text="countdown"></span> second(s)...</p>
-                <a href="{{ route('dashboard') }}" class="inline-flex items-center px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg shadow-sm transition-colors">
+                <a href="{{ $this->returnToDashboardOrLeads() }}" class="inline-flex items-center px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg shadow-sm transition-colors">
                     <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m0 0l-7 7-7-7m7 7V21"></path>
                     </svg>
@@ -272,7 +314,7 @@ new class extends Component
     <!-- Header -->
     <div class="mb-6 flex items-center justify-between">
         <div class="flex items-center space-x-4">
-            <a href="{{ route('leads.index') }}" class="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+            <a href="{{ $this->returnToDashboardOrLeads() }}" class="p-2 hover:bg-gray-100 rounded-lg transition-colors">
                 <svg class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
                 </svg>
