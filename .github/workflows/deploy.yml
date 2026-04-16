@@ -1,0 +1,160 @@
+# Continuous deployment: push to `main` → build Vite assets on GitHub → SSH to server (git + composer + artisan) → SCP `public/build`.
+#
+# Required repository secrets:
+#   CPANEL_HOST        — SSH hostname (e.g. example.com or server IP)
+#   CPANEL_USERNAME    — SSH user (cPanel account)
+#   CPANEL_SSH_PORT    — SSH port (e.g. 22 or host’s custom port)
+#   CPANEL_SSH_KEY     — Private key: multiline PEM beginning with -----BEGIN, OR single-line base64 (no line breaks)
+#   DEPLOY_PATH        — Absolute path to the app on the server (repo root), e.g. /home/USER/public_html/myapp
+#
+# Optional:
+#   DEPLOY_APP_URL     — If set, updates `APP_URL=` in `.env` on the server after other env steps (full URL, subdirectory allowed)
+#
+# Server prerequisites:
+#   - Repository cloned once at DEPLOY_PATH with `origin` → this GitHub repo; credentials/deploy key allow `git fetch`.
+#   - `git`, `php`, `curl`, and `perl` on PATH (`perl` is only required if you set DEPLOY_APP_URL; optional URL is applied with a small perl in-place edit).
+#   - `composer` global optional; if missing, the workflow downloads `composer.phar` into the project directory.
+#   - Production `.env` (especially database) configured; first run may create `.env` from `.env.example` and generate `APP_KEY` only.
+
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies and build assets
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+
+      - name: Prepare SSH private key
+        env:
+          CPANEL_SSH_KEY: ${{ secrets.CPANEL_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.ssh"
+          chmod 700 "${HOME}/.ssh"
+          KEY_FILE="${HOME}/.ssh/deploy_key"
+
+          if [ -z "${CPANEL_SSH_KEY:-}" ]; then
+            echo "::error::Secret CPANEL_SSH_KEY is empty"
+            exit 1
+          fi
+
+          # PEM (multiline) vs base64-encoded key
+          if printf '%s' "${CPANEL_SSH_KEY}" | grep -qE '^[[:space:]]*-----BEGIN'; then
+            printf '%s\n' "${CPANEL_SSH_KEY}" | sed 's/\r$//' > "${KEY_FILE}"
+          else
+            if ! printf '%s' "${CPANEL_SSH_KEY}" | tr -d '\n\r\t ' | base64 -d > "${KEY_FILE}" 2>/dev/null; then
+              echo "::error::CPANEL_SSH_KEY is not valid PEM and not valid base64"
+              exit 1
+            fi
+          fi
+
+          chmod 600 "${KEY_FILE}"
+
+          if ! ssh-keygen -y -f "${KEY_FILE}" -P '' >/dev/null 2>&1; then
+            echo "::error::SSH key is invalid, corrupted, or passphrase-protected (passphrase-protected keys are not supported)"
+            exit 1
+          fi
+
+      - name: Deploy via SSH and sync build assets
+        env:
+          CPANEL_HOST: ${{ secrets.CPANEL_HOST }}
+          CPANEL_USERNAME: ${{ secrets.CPANEL_USERNAME }}
+          CPANEL_SSH_PORT: ${{ secrets.CPANEL_SSH_PORT }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_APP_URL: ${{ secrets.DEPLOY_APP_URL }}
+        run: |
+          set -euo pipefail
+
+          for name in CPANEL_HOST CPANEL_USERNAME CPANEL_SSH_PORT DEPLOY_PATH; do
+            eval "val=\${$name:-}"
+            if [ -z "${val}" ]; then
+              echo "::error::Required secret $name is empty"
+              exit 1
+            fi
+          done
+
+          SSH_COMMON=( -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "${HOME}/.ssh/deploy_key" -p "${CPANEL_SSH_PORT}" )
+          TARGET="${CPANEL_USERNAME}@${CPANEL_HOST}"
+
+          if [ -n "${DEPLOY_APP_URL:-}" ]; then
+            export DEPLOY_APP_URL_B64="$(printf '%s' "${DEPLOY_APP_URL}" | base64 -w0)"
+          else
+            export DEPLOY_APP_URL_B64=""
+          fi
+
+          ssh "${SSH_COMMON[@]}" "${TARGET}" bash -s <<REMOTE_SCRIPT
+          set -euo pipefail
+          cd "${DEPLOY_PATH}"
+
+          git fetch origin main && git reset --hard origin/main
+
+          if [ ! -f .env ]; then
+            cp .env.example .env
+            php artisan key:generate --force
+          fi
+
+          if ! grep -qE '^APP_KEY=.{20,}' .env; then
+            php artisan key:generate --force
+          fi
+
+          if [ -n "${DEPLOY_APP_URL_B64}" ]; then
+            APP_URL_VALUE=\$(printf '%s' "${DEPLOY_APP_URL_B64}" | base64 -d)
+            export APP_URL_VALUE
+            if grep -qE '^APP_URL=' .env; then
+              perl -pi -e 's/^APP_URL=.*/"APP_URL".\$ENV{APP_URL_VALUE}/e' .env
+            else
+              printf 'APP_URL=%s\n' "\$APP_URL_VALUE" >> .env
+            fi
+          fi
+
+          if command -v composer >/dev/null 2>&1; then
+            composer install --no-dev --optimize-autoloader --no-interaction
+          elif [ -f composer.phar ]; then
+            php composer.phar install --no-dev --optimize-autoloader --no-interaction
+          else
+            curl -sS https://getcomposer.org/installer -o composer-setup.php
+            php composer-setup.php --install-dir=. --filename=composer.phar
+            rm -f composer-setup.php
+            php composer.phar install --no-dev --optimize-autoloader --no-interaction
+          fi
+
+          chmod -R 775 storage bootstrap/cache
+
+          php artisan storage:link
+
+          php artisan migrate --force
+
+          php artisan config:clear && php artisan cache:clear
+          php artisan config:cache && php artisan route:cache && php artisan view:cache
+          REMOTE_SCRIPT
+
+          ssh "${SSH_COMMON[@]}" "${TARGET}" "mkdir -p '${DEPLOY_PATH}/public/build'"
+
+          shopt -s nullglob
+          build_files=( public/build/* public/build/.[!.]* )
+          if [ "${#build_files[@]}" -eq 0 ]; then
+            echo "::error::public/build is empty; npm run build should have produced assets"
+            exit 1
+          fi
+          shopt -u nullglob
+
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "${HOME}/.ssh/deploy_key" -P "${CPANEL_SSH_PORT}" -r \
+            public/build/. "${TARGET}:${DEPLOY_PATH}/public/build/"
