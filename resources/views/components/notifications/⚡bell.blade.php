@@ -51,7 +51,9 @@ new class extends Component
                 ->count();
 
             $collection = $query
-                ->with('lead.leadSheet')
+                ->with(['lead' => function ($relation) {
+                    $relation->select('id', 'lead_sheet_id', 'lead_group_id');
+                }])
                 ->orderBy('created_at', 'desc')
                 ->limit(10)
                 ->get();
@@ -82,7 +84,9 @@ new class extends Component
             }
 
             $notification = $this->notificationQueryForUser()
-                ->with('lead.leadSheet')
+                ->with(['lead' => function ($relation) {
+                    $relation->select('id', 'lead_sheet_id', 'lead_group_id');
+                }])
                 ->where('id', $notificationId)
                 ->first();
 
@@ -151,6 +155,30 @@ new class extends Component
     protected function notificationQueryForUser()
     {
         return Notification::where('user_id', auth()->id());
+    }
+
+    /**
+     * Leads index URL so “back” from the lead page returns to the same sheet/tab when possible.
+     *
+     * @param  array<string, mixed>|null  $lead
+     */
+    public function leadsIndexReturnUrlForLead(?array $lead): string
+    {
+        if (!is_array($lead) || empty($lead['id'])) {
+            return route('leads.index', ['viewMode' => 'table']);
+        }
+
+        $params = ['viewMode' => 'table'];
+
+        if (!empty($lead['lead_sheet_id'])) {
+            $params['sheetFilter'] = (string) $lead['lead_sheet_id'];
+        }
+
+        if (array_key_exists('lead_group_id', $lead) && $lead['lead_group_id'] !== null && $lead['lead_group_id'] !== '') {
+            $params['groupFilter'] = (string) $lead['lead_group_id'];
+        }
+
+        return route('leads.index', $params);
     }
 
     // No render method needed for anonymous components
@@ -275,8 +303,8 @@ new class extends Component
                                 </p>
                             @endif
                             @if(isset($notification['lead']))
-                                <a 
-                                    href="{{ route('leads.show', $notification['lead']['id']) }}" 
+                                <a
+                                    href="{{ route('leads.show', ['id' => $notification['lead']['id'], 'return_to' => $this->leadsIndexReturnUrlForLead($notification['lead'])]) }}"
                                     class="text-xs text-blue-600 hover:text-blue-800 mt-1 inline-block"
                                     onclick="event.stopPropagation()"
                                 >

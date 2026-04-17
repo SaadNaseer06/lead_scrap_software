@@ -3,7 +3,6 @@
 use App\Models\Lead;
 use App\Models\LeadGroup;
 use App\Models\LeadSheet;
-use App\Models\User;
 use App\Services\NotificationService;
 use Carbon\Carbon;
 use Livewire\Component;
@@ -422,6 +421,13 @@ new class extends Component
                     ->where('created_by', auth()->id())
                     ->update($payload);
 
+                $updatedLead = Lead::where('id', $row['id'])
+                    ->where('created_by', auth()->id())
+                    ->first();
+                if ($updatedLead) {
+                    NotificationService::notifySalesNewLeadWhenCoreFieldsComplete($updatedLead);
+                }
+
                 $this->leadsData[$index]['social_links'] = $payload['social_links'] ?? '';
                 continue;
             }
@@ -438,6 +444,8 @@ new class extends Component
                 'status' => 'no response',
                 ...$payload,
             ]);
+
+            NotificationService::notifySalesNewLeadWhenCoreFieldsComplete($lead);
 
             $this->leadsData[$index]['id'] = $lead->id;
             $this->leadsData[$index]['social_links'] = $payload['social_links'] ?? '';
@@ -840,7 +848,7 @@ new class extends Component
                         $firstImportedGroupId ??= (string) $targetGroup->id;
                     }
 
-                    Lead::create([
+                    $importedLead = Lead::create([
                         'created_by' => auth()->id(),
                         'lead_sheet_id' => $sheet->id,
                         'lead_group_id' => $targetGroup->id,
@@ -859,6 +867,8 @@ new class extends Component
                         'notes' => $payload['notes'] ?? null,
                         'lead_date' => $payload['lead_date'] ?? now()->toDateString(),
                     ]);
+
+                    NotificationService::notifySalesNewLeadWhenCoreFieldsComplete($importedLead);
 
                     $imported++;
                 }
@@ -1388,6 +1398,13 @@ new class extends Component
                 Lead::where('id', $row['id'])
                     ->where('created_by', auth()->id())
                     ->update($updateData);
+
+                $updatedLead = Lead::where('id', $row['id'])
+                    ->where('created_by', auth()->id())
+                    ->first();
+                if ($updatedLead) {
+                    NotificationService::notifySalesNewLeadWhenCoreFieldsComplete($updatedLead);
+                }
             } catch (\Exception $e) {
                 \Illuminate\Support\Facades\Log::error('Error updating lead: ' . $e->getMessage());
                 $this->dispatch('show-toast', ['type' => 'error', 'message' => 'Failed to update lead.']);
@@ -1460,6 +1477,13 @@ new class extends Component
                 Lead::where('id', $row['id'])
                     ->where('created_by', auth()->id())
                     ->update($updateData);
+
+                $updatedLead = Lead::where('id', $row['id'])
+                    ->where('created_by', auth()->id())
+                    ->first();
+                if ($updatedLead) {
+                    NotificationService::notifySalesNewLeadWhenCoreFieldsComplete($updatedLead);
+                }
 
                 return;
             }
@@ -1633,16 +1657,7 @@ new class extends Component
             'web_link' => !empty($draftRow['web_link']) ? trim((string) $draftRow['web_link']) : null,
         ]);
 
-        $salesUsers = User::whereIn('role', ['sales', 'upsale', 'front_sale'])->get();
-
-        if ($salesUsers->isNotEmpty()) {
-            NotificationService::createForUsers(
-                $salesUsers,
-                $lead,
-                'new_lead',
-                "New lead '{$lead->name}' has been added by " . auth()->user()->name
-            );
-        }
+        NotificationService::notifySalesNewLeadWhenCoreFieldsComplete($lead);
 
         return $lead;
     }
@@ -1688,6 +1703,20 @@ new class extends Component
     protected function visibleTableRecordCount(): int
     {
         return count($this->persistedTableRows()) + count($this->persistedDraftLeadRows());
+    }
+
+    /**
+     * True only for the blank “new row” composer (no id and no field content yet).
+     * Persisted leads and in-progress drafts use a white row background.
+     */
+    public function isTableScratchEmptyRow(array $row): bool
+    {
+        if (!empty($row['id'])) {
+            return false;
+        }
+
+        return !collect(['name', 'email', 'services', 'phone', 'location', 'position', 'platform', 'social_links', 'detail', 'web_link'])
+            ->contains(fn ($field) => trim((string) ($row[$field] ?? '')) !== '');
     }
 
     protected function shouldAppendTableDraftRow(): bool
@@ -2055,7 +2084,7 @@ new class extends Component
                 @if(auth()->user()->isScrapper())
                     <button
                         type="button"
-                        x-on:click="importModalOpen = true"
+                        x-on:click="importModalOpen = true; $wire.set('importSheetId', @js((string) ($sheetFilter ?? '')))"
                         class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg font-semibold shadow-sm hover:shadow-md transition-all flex items-center space-x-2"
                     >
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2135,7 +2164,7 @@ new class extends Component
                             <label for="import_sheet_id" class="block text-sm font-semibold text-slate-700 mb-2">Target Sheet</label>
                             <select
                                 id="import_sheet_id"
-                                wire:model="importSheetId"
+                                wire:model.live="importSheetId"
                                 class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white @error('importSheetId') border-red-500 @enderror"
                             >
                                 <option value="">Select a sheet...</option>
@@ -2369,15 +2398,57 @@ new class extends Component
                         @php
                             $isFilteredTableView = $this->hasActiveTableFilters();
                             $tableDisplayRows = $leadsData;
+                            $draftRowCount = $isFilteredTableView ? 0 : count($draftLeadRows);
                         @endphp
                         <tbody class="bg-white divide-y divide-gray-200">
+                            @if(!$isFilteredTableView && $this->shouldAppendTableDraftRow())
+                                @for($draftIndex = $draftRowCount - 1; $draftIndex >= 0; $draftIndex--)
+                                    @php $draftRow = $draftLeadRows[$draftIndex] ?? []; @endphp
+                                    <tr wire:key="lead-draft-row-{{ $draftRow['_row_key'] ?? ('draft-' . $draftIndex) }}" class="{{ $this->isTableScratchEmptyRow($draftRow) ? 'bg-blue-50' : 'bg-white hover:bg-gray-50' }}">
+                                        @if(!$sheetFilter)
+                                            <td class="px-4 py-2 text-sm text-gray-500 whitespace-nowrap" colspan="2">—</td>
+                                        @endif
+                                        <td class="px-4 py-2">
+                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.name" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Name">
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <input type="email" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.email" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Email">
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.services" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Services">
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.phone" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Phone">
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.location" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Location">
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.position" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Position">
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.platform" class="w-32 px-2 py-1 border border-gray-300 rounded" placeholder="Platform">
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <textarea wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.social_links" class="w-56 px-2 py-1 border border-gray-300 rounded" rows="2" placeholder="Social links (LinkedIn, Facebook, Instagram)"></textarea>
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.detail" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Details">
+                                        </td>
+                                        <td class="px-4 py-2">
+                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.web_link" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Web link">
+                                        </td>
+                                        <td class="px-4 py-2"></td>
+                                    </tr>
+                                @endfor
+                            @endif
                             @forelse($tableDisplayRows as $index => $row)
                                 @php
                                     $rowKey = $row['_row_key'] ?? ('idx-' . $index);
                                 @endphp
                                 <tr
                                     wire:key="lead-row-{{ $rowKey }}"
-                                    class="{{ !$isFilteredTableView && empty($row['id']) ? 'bg-blue-50' : 'hover:bg-gray-50' }}"
+                                    class="{{ $isFilteredTableView ? 'bg-white hover:bg-gray-50' : ($this->isTableScratchEmptyRow($row) ? 'bg-blue-50' : 'bg-white hover:bg-gray-50') }}"
                                 >
                                     @if(!$sheetFilter)
                                         <td class="px-4 py-2 text-sm text-gray-700 whitespace-nowrap">
@@ -2488,49 +2559,14 @@ new class extends Component
                                     </td>
                                 </tr>
                             @empty
-                                <tr>
-                                    <td colspan="{{ $sheetFilter ? '11' : '13' }}" class="px-6 py-12 text-center text-gray-500">
-                                        No leads found.
-                                    </td>
-                                </tr>
-                            @endforelse
-                            @if(!$isFilteredTableView && $this->shouldAppendTableDraftRow())
-                                @foreach($draftLeadRows as $draftIndex => $draftRow)
-                                    <tr wire:key="lead-draft-row-{{ $draftRow['_row_key'] ?? ('draft-' . $draftIndex) }}" class="bg-blue-50">
-                                        <td class="px-4 py-2">
-                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.name" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Name">
+                                @if($isFilteredTableView || !$this->shouldAppendTableDraftRow())
+                                    <tr>
+                                        <td colspan="{{ $sheetFilter ? '11' : '13' }}" class="px-6 py-12 text-center text-gray-500">
+                                            No leads found.
                                         </td>
-                                        <td class="px-4 py-2">
-                                            <input type="email" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.email" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Email">
-                                        </td>
-                                        <td class="px-4 py-2">
-                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.services" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Services">
-                                        </td>
-                                        <td class="px-4 py-2">
-                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.phone" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Phone">
-                                        </td>
-                                        <td class="px-4 py-2">
-                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.location" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Location">
-                                        </td>
-                                        <td class="px-4 py-2">
-                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.position" class="w-40 px-2 py-1 border border-gray-300 rounded" placeholder="Position">
-                                        </td>
-                                        <td class="px-4 py-2">
-                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.platform" class="w-32 px-2 py-1 border border-gray-300 rounded" placeholder="Platform">
-                                        </td>
-                                        <td class="px-4 py-2">
-                                            <textarea wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.social_links" class="w-56 px-2 py-1 border border-gray-300 rounded" rows="2" placeholder="Social links (LinkedIn, Facebook, Instagram)"></textarea>
-                                        </td>
-                                        <td class="px-4 py-2">
-                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.detail" class="w-56 px-2 py-1 border border-gray-300 rounded" placeholder="Details">
-                                        </td>
-                                        <td class="px-4 py-2">
-                                            <input type="text" wire:model.live.debounce.500ms="draftLeadRows.{{ $draftIndex }}.web_link" class="w-48 px-2 py-1 border border-gray-300 rounded" placeholder="Web link">
-                                        </td>
-                                        <td class="px-4 py-2"></td>
                                     </tr>
-                                @endforeach
-                            @endif
+                                @endif
+                            @endforelse
                         </tbody>
                     </table>
                 </div>

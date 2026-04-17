@@ -1,7 +1,6 @@
 <?php
 
 use App\Models\Lead;
-use App\Models\User;
 use App\Models\LeadSheet;
 use App\Services\NotificationService;
 use Livewire\Component;
@@ -151,17 +150,7 @@ new class extends Component
 
                 $lead = Lead::create($leadData);
 
-                // Notify all sales users and broadcast the update to their active clients.
-                $salesUsers = User::whereIn('role', ['sales', 'upsale', 'front_sale'])->get();
-                
-                if ($salesUsers->isNotEmpty()) {
-                    NotificationService::createForUsers(
-                        $salesUsers,
-                        $lead,
-                        'new_lead',
-                        "New lead '{$lead->name}' has been added by " . auth()->user()->name
-                    );
-                }
+                $salesNotified = NotificationService::notifySalesNewLeadWhenCoreFieldsComplete($lead);
 
                 DB::commit();
 
@@ -175,8 +164,11 @@ new class extends Component
                 $this->closeModal();
                 
                 // Show success message
-                $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Lead created successfully! Sales team has been notified.']);
-                session()->flash('message', 'Lead created successfully! Sales team has been notified.');
+                $successMessage = $salesNotified
+                    ? 'Lead created successfully! Sales team has been notified.'
+                    : 'Lead created successfully! Sales team will be notified once the lead has a name, details, and at least an email or a phone number.';
+                $this->dispatch('show-toast', ['type' => 'success', 'message' => $successMessage]);
+                session()->flash('message', $successMessage);
 
             } catch (\Exception $e) {
                 DB::rollBack();
