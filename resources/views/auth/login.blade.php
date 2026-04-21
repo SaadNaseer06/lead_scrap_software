@@ -5,12 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>Login - Lead Management System</title>
+    <x-favicon-links />
     @vite(['resources/css/app.css', 'resources/js/app.js'])
 </head>
 <body class="bg-gray-50">
     <div class="min-h-screen flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8">
         <div class="max-w-md w-full space-y-8">
             <div>
+                <div class="flex justify-center">
+                    <div class="w-14 h-14 rounded-xl overflow-hidden ring-1 ring-gray-200 bg-white shadow-sm flex items-center justify-center">
+                        <img src="{{ asset('favicon.png') }}" alt="" class="w-full h-full object-cover" width="56" height="56" />
+                    </div>
+                </div>
                 <h2 class="mt-6 text-center text-3xl font-extrabold text-gray-900">
                     Lead Management System
                 </h2>

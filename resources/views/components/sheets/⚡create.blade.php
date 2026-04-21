@@ -153,7 +153,7 @@ new class extends Component
 };
 ?>
 
-<div class="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+<div class="bg-white rounded-lg shadow-sm border-2 border-blue-200 p-4">
     @if($successMessage)
         <div class="mb-4 px-4 py-3 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-800">
             {{ $successMessage }}
@@ -175,7 +175,7 @@ new class extends Component
                     type="text"
                     id="sheet_name"
                     wire:model.defer="name"
-                    class="w-full max-w-md px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 @error('name') border-red-500 @enderror"
+                    class="w-full max-w-md px-4 py-2.5 border-2 border-blue-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-600 @error('name') border-red-500 @enderror"
                     placeholder="e.g. March 2026 Leads"
                     autocomplete="off"
                     required
@@ -189,7 +189,7 @@ new class extends Component
                     Assign to Team(s) <span class="text-red-500">*</span>
                 </label>
                 <p class="text-xs text-gray-600 mb-2">Select at least one team. Only members of selected teams will see this sheet and its leads.</p>
-                <div class="flex flex-wrap gap-3 p-3 border border-gray-300 rounded-lg bg-gray-50 max-h-36 overflow-y-auto @error('teamIds') border-red-500 @enderror">
+                <div class="flex flex-wrap gap-3 p-3 border-2 border-blue-200 rounded-lg bg-gray-50 max-h-36 overflow-y-auto @error('teamIds') border-red-500 @enderror">
                     @foreach($teams as $team)
                         <label class="inline-flex items-center gap-2 cursor-pointer px-2 py-1 rounded hover:bg-gray-100">
                             <input type="checkbox" wire:model.defer="teamIds" value="{{ $team->id }}" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
