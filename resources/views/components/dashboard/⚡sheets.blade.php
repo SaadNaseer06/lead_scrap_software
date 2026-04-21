@@ -52,8 +52,8 @@ new class extends Component
 };
 ?>
 
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mt-6" wire:poll.5s="loadSheets">
-    <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
+<div class="bg-white rounded-xl shadow-sm border-2 border-blue-200 overflow-hidden mt-6" wire:poll.5s="loadSheets">
+    <div class="bg-gray-50 px-6 py-4 border-b-2 border-blue-200">
         <h2 class="text-lg font-semibold text-gray-900">Sheets</h2>
     </div>
     <div class="p-6">

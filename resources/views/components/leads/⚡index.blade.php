@@ -2056,7 +2056,13 @@ new class extends Component
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::error('Error rendering leads index: ' . $e->getMessage());
             return view('components.leads.⚡index', [
-                'leads' => \Illuminate\Pagination\LengthAwarePaginator::empty(),
+                'leads' => new \Illuminate\Pagination\LengthAwarePaginator(
+                    [],
+                    0,
+                    10,
+                    \Illuminate\Pagination\LengthAwarePaginator::resolveCurrentPage(),
+                    ['path' => \Illuminate\Pagination\LengthAwarePaginator::resolveCurrentPath()]
+                ),
                 'tableRows' => [],
                 'sheets' => collect([]),
                 'groups' => collect([]),
