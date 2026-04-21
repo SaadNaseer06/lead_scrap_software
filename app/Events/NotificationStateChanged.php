@@ -18,19 +18,29 @@ class NotificationStateChanged implements ShouldBroadcastNow
         public ?int $notificationId = null,
         public string $action = 'updated',
         public int $unreadCount = 0,
+        public ?string $pushTitle = null,
+        public ?string $pushBody = null,
     ) {
     }
 
     public static function fromNotification(Notification $notification, string $action = 'updated'): self
     {
+        $pushTitle = $action === 'created' ? (string) config('app.name', 'LeadPro') : null;
+        $pushBody = $action === 'created' ? (string) $notification->message : null;
+
         return new self(
             userId: $notification->user_id,
             notificationId: $notification->id,
             action: $action,
             unreadCount: Notification::query()
                 ->where('user_id', $notification->user_id)
-                ->whereNull('read_at')
+                ->where(function ($builder) {
+                    $builder->where('read', false)
+                        ->orWhereNull('read');
+                })
                 ->count(),
+            pushTitle: $pushTitle,
+            pushBody: $pushBody,
         );
     }
 
@@ -51,6 +61,8 @@ class NotificationStateChanged implements ShouldBroadcastNow
             'notification_id' => $this->notificationId,
             'action' => $this->action,
             'unread_count' => $this->unreadCount,
+            'push_title' => $this->pushTitle,
+            'push_body' => $this->pushBody,
         ];
     }
 }

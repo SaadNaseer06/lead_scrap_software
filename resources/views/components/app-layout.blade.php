@@ -5,6 +5,15 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    @auth
+        <meta name="auth-user-id" content="{{ auth()->id() }}">
+        <meta name="app-name" content="{{ config('app.name') }}">
+        <meta name="app-dashboard-push" content="{{ request()->routeIs('dashboard') ? '1' : '0' }}">
+        @if(filled(config('webpush.vapid.public_key')))
+            <meta name="webpush-vapid-public" content="{{ config('webpush.vapid.public_key') }}">
+        @endif
+    @endauth
     <title>{{ $title }}</title>
     @vite(['resources/css/app.css', 'resources/js/app.js'])
     @livewireStyles
@@ -113,6 +122,52 @@
         {{ $slot }}
     </main>
 
+    @auth
+        <div id="toast-container" class="fixed top-4 right-4 z-[100] space-y-2 pointer-events-none" style="z-index: 9999;" aria-live="polite"></div>
+    @endauth
+
     @livewireScripts
+
+    @auth
+        <script>
+            function showAppToast(message, type) {
+                if (!message) return;
+                const container = document.getElementById('toast-container');
+                if (!container) return;
+
+                const toast = document.createElement('div');
+                toast.className = 'pointer-events-auto';
+                const bg = { success: 'bg-emerald-600', error: 'bg-red-600', warning: 'bg-amber-500', info: 'bg-blue-600' };
+                const bgColor = bg[type] || bg.info;
+
+                toast.innerHTML = `
+                    <div class="${bgColor} text-white px-4 py-3 rounded-xl shadow-lg flex items-start gap-3 max-w-md border border-white/10">
+                        <span class="flex-1 text-sm leading-snug"></span>
+                        <button type="button" class="shrink-0 text-white/90 hover:text-white p-0.5 rounded focus:outline-none focus:ring-2 focus:ring-white/50" aria-label="Dismiss">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                        </button>
+                    </div>`;
+                toast.querySelector('span').textContent = message;
+                toast.querySelector('button').addEventListener('click', () => toast.remove());
+                container.appendChild(toast);
+
+                setTimeout(() => {
+                    if (toast.parentElement) toast.remove();
+                }, 8000);
+            }
+
+            window.addEventListener('show-toast', function (e) {
+                const d = e.detail || {};
+                showAppToast(d.message || '', d.type || 'info');
+            });
+
+            document.addEventListener('livewire:init', () => {
+                Livewire.on('show-toast', (data) => {
+                    const payload = typeof data === 'string' ? { message: data } : (data || {});
+                    showAppToast(payload.message || '', payload.type || 'info');
+                });
+            });
+        </script>
+    @endauth
 </body>
 </html>

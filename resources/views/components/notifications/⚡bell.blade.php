@@ -193,21 +193,56 @@ new class extends Component
         channel: null,
         echoInitAttempts: 0,
         echoInitTimer: null,
+        echoBoundHandler: null,
+        echoRefreshTimer: null,
+        bindEchoHandler() {
+            if (!this.echoBoundHandler) {
+                this.echoBoundHandler = (payload) => {
+                    if (this.echoRefreshTimer) {
+                        clearTimeout(this.echoRefreshTimer);
+                    }
+                    this.echoRefreshTimer = setTimeout(() => {
+                        $wire.call('loadNotifications');
+                        this.echoRefreshTimer = null;
+                    }, 80);
+
+                    const path = window.location.pathname || '';
+                    const onDashboard = path === '/dashboard' || path.endsWith('/dashboard');
+                    if (
+                        onDashboard
+                        && document.visibilityState === 'visible'
+                        && payload?.action === 'created'
+                        && (payload?.push_body ?? payload?.pushBody)
+                    ) {
+                        const msg = payload.push_body ?? payload.pushBody;
+                        if (window.Livewire?.dispatch) {
+                            window.Livewire.dispatch('show-toast', { type: 'info', message: msg });
+                        } else {
+                            window.dispatchEvent(
+                                new CustomEvent('show-toast', { detail: { type: 'info', message: msg } }),
+                            );
+                        }
+                    }
+                };
+            }
+            return this.echoBoundHandler;
+        },
         attachEchoListener() {
             if (!window.Echo?.private) {
                 return false;
             }
 
-            // Avoid duplicate subscriptions when Livewire re-renders the component.
+            const handler = this.bindEchoHandler();
+            const channelName = 'notifications.{{ auth()->id() }}';
+
             if (this.channel) {
-                return true;
+                try {
+                    this.channel.stopListening('.notification.state-changed', handler);
+                } catch (e) { /* noop */ }
             }
 
-            this.channel = window.Echo.private('notifications.{{ auth()->id() }}');
-            this.channel
-                .listen('.notification.state-changed', () => {
-                    $wire.refreshNotifications();
-                });
+            this.channel = window.Echo.private(channelName);
+            this.channel.listen('.notification.state-changed', handler);
 
             return true;
         },
@@ -216,21 +251,30 @@ new class extends Component
                 return;
             }
 
-            // Retry briefly in case Echo loads after this component initializes.
             this.echoInitTimer = setInterval(() => {
                 this.echoInitAttempts++;
 
-                if (this.attachEchoListener() || this.echoInitAttempts >= 10) {
+                if (this.attachEchoListener() || this.echoInitAttempts >= 45) {
                     clearInterval(this.echoInitTimer);
                     this.echoInitTimer = null;
                 }
-            }, 1000);
+            }, 500);
         },
         destroy() {
             if (this.echoInitTimer) {
                 clearInterval(this.echoInitTimer);
                 this.echoInitTimer = null;
             }
+            if (this.echoRefreshTimer) {
+                clearTimeout(this.echoRefreshTimer);
+                this.echoRefreshTimer = null;
+            }
+            if (this.channel && this.echoBoundHandler) {
+                try {
+                    this.channel.stopListening('.notification.state-changed', this.echoBoundHandler);
+                } catch (e) { /* noop */ }
+            }
+            this.channel = null;
         }
     }"
 >
