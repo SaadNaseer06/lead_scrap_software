@@ -809,6 +809,7 @@ new class extends Component
             $importedTabs = [];
             $firstImportedGroupId = null;
             $skippedWorksheets = [];
+            $firstImportedLead = null;
 
             foreach ($reader->getSheetIterator() as $sheetIterator) {
                 $headerMap = [];
@@ -868,10 +869,16 @@ new class extends Component
                         'lead_date' => $payload['lead_date'] ?? now()->toDateString(),
                     ]);
 
-                    NotificationService::notifySalesNewLeadWhenCoreFieldsComplete($importedLead);
+                    if ($firstImportedLead === null) {
+                        $firstImportedLead = $importedLead;
+                    }
 
                     $imported++;
                 }
+            }
+
+            if ($imported > 0 && $firstImportedLead !== null) {
+                NotificationService::notifySalesTeamOfSheetImport($sheet, $imported, $firstImportedLead);
             }
 
             if ($imported === 0) {

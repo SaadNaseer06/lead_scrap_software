@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Events\NotificationStateChanged;
 use App\Models\Lead;
+use App\Models\LeadSheet;
 use App\Models\Notification;
 use App\Models\User;
 use App\Notifications\LeadWebPushNotification;
@@ -82,6 +83,27 @@ class NotificationService
         );
 
         return true;
+    }
+
+    /**
+     * Single sales notification after a scrapper bulk-imports into a sheet (not one notification per imported row).
+     */
+    public static function notifySalesTeamOfSheetImport(LeadSheet $sheet, int $importedCount, Lead $anchorLead): void
+    {
+        if ($importedCount <= 0) {
+            return;
+        }
+
+        $salesUsers = User::whereIn('role', ['front_sale', 'upsale'])->get();
+        if ($salesUsers->isEmpty()) {
+            return;
+        }
+
+        $actorName = auth()->user()?->name ?? 'A scrapper';
+        $sheetName = $sheet->name;
+        $message = "{$actorName} imported {$importedCount} lead(s) into sheet '{$sheetName}'. Open the sheet to review new rows.";
+
+        self::createForUsers($salesUsers, $anchorLead, 'sheet_import', $message);
     }
 
     /**
