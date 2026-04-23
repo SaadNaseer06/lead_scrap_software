@@ -1,10 +1,14 @@
 <?php
 
 use App\Models\Lead;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Broadcast;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
-use App\Http\Controllers\Auth\LoginController; 
+use App\Http\Controllers\Auth\LoginController;
+
+Broadcast::routes(['middleware' => ['web', 'auth']]);
 
 // Authentication Routes
 Route::get('/login', [LoginController::class, 'showLoginForm'])->name('login');
@@ -13,6 +17,25 @@ Route::post('/logout', [LoginController::class, 'logout'])->name('logout');
 
 // Protected Routes
 Route::middleware('auth')->group(function () {
+    Route::post('/webpush/subscribe', function (Request $request) {
+        $validated = $request->validate([
+            'endpoint' => 'required|string',
+            'keys' => 'required|array',
+            'keys.p256dh' => 'required|string',
+            'keys.auth' => 'required|string',
+            'expirationTime' => 'nullable',
+            'contentEncoding' => 'nullable|string',
+        ]);
+
+        $request->user()->updatePushSubscription(
+            $validated['endpoint'],
+            $validated['keys']['p256dh'],
+            $validated['keys']['auth'],
+            $validated['contentEncoding'] ?? null,
+        );
+
+        return response()->json(['ok' => true]);
+    })->name('webpush.subscribe');
     Route::get('/', function () {
         return redirect()->route('dashboard');
     });

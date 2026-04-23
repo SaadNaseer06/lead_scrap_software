@@ -31,14 +31,15 @@ return [
             'key' => env('PUSHER_APP_KEY'),
             'secret' => env('PUSHER_APP_SECRET'),
             'app_id' => env('PUSHER_APP_ID'),
-            'options' => [
-                'cluster' => env('PUSHER_APP_CLUSTER'),
-                'host' => env('PUSHER_HOST'),
-                'port' => env('PUSHER_PORT', 443),
-                'scheme' => env('PUSHER_SCHEME', 'https'),
-                'useTLS' => env('PUSHER_SCHEME', 'https') === 'https',
-            ],
-            'client_options' => [],
+            'options' => array_merge(
+                [
+                    'cluster' => env('PUSHER_APP_CLUSTER', 'mt1'),
+                    'port' => env('PUSHER_PORT', 443),
+                    'scheme' => env('PUSHER_SCHEME', 'https'),
+                    'useTLS' => env('PUSHER_SCHEME', 'https') === 'https',
+                ],
+                filled(env('PUSHER_HOST')) ? ['host' => trim((string) env('PUSHER_HOST'))] : [],
+            ),
         ],
     ],
 ];

@@ -217,7 +217,16 @@ new class extends Component
             }
 
             $this->lead->update(['status' => $status]);
-            
+            $this->lead->refresh();
+
+            $statusLabel = ucwords($status);
+            $actorName = auth()->user()->name;
+            NotificationService::notifyScrapperWhenLeadUpdatedByOthers(
+                $this->lead,
+                'lead_status_updated',
+                "Lead '{$this->lead->name}' status was set to {$statusLabel} by {$actorName}."
+            );
+
             // Dispatch events to refresh leads list and notifications
             $this->dispatch('lead-updated');
             
@@ -247,7 +256,7 @@ new class extends Component
                 return $this->redirect($this->returnToDashboardOrLeads());
             }
 
-            if (!auth()->user()->isSalesTeam()) {
+            if (! auth()->user()->isSalesTeam() && ! auth()->user()->isAdmin()) {
                 $this->dispatch('show-toast', type: 'error', message: 'You do not have permission to add comments.');
                 return;
             }
@@ -262,9 +271,17 @@ new class extends Component
                 'message' => trim($this->commentMessage),
             ]);
 
+            $actorName = auth()->user()->name;
+            NotificationService::notifyScrapperWhenLeadUpdatedByOthers(
+                $this->lead,
+                'lead_comment_added',
+                "{$actorName} added a comment on lead '{$this->lead->name}'."
+            );
+
             $this->reset('commentMessage');
             $this->loadLead();
-            
+
+            $this->dispatch('lead-updated');
             $this->dispatch('show-toast', ['type' => 'success', 'message' => 'Comment added successfully.']);
             request()->session()->flash('message', 'Comment added.');
         } catch (\Illuminate\Validation\ValidationException $e) {
@@ -497,7 +514,7 @@ new class extends Component
                     <p class="text-sm text-gray-500 mb-4">No comments yet.</p>
                 @endif
 
-                @if(auth()->user()->isSalesTeam())
+                @if(auth()->user()->isSalesTeam() || auth()->user()->isAdmin())
                     <form wire:submit="addComment" class="space-y-3">
                         <textarea
                             wire:model="commentMessage"
