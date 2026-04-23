@@ -13,6 +13,7 @@ function metaContent(name) {
     return document.querySelector(`meta[name="${name}"]`)?.getAttribute('content') ?? '';
 }
 
+<<<<<<< HEAD
 /** Avoid hammering /webpush/subscribe on every 2s Livewire poll */
 let lastWebPushAttemptAt = 0;
 const WEB_PUSH_MIN_INTERVAL_MS = 8000;
@@ -28,10 +29,14 @@ export async function registerWebPush() {
     }
     lastWebPushAttemptAt = now;
 
+=======
+export async function registerWebPush() {
+>>>>>>> 28a3a0abbd9a0060b2ddc8fe90b527045805b0aa
     const vapidPublic = metaContent('webpush-vapid-public');
     const userId = metaContent('auth-user-id');
 
     if (!vapidPublic || !userId || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+<<<<<<< HEAD
         return { ok: false, reason: 'missing-meta-or-api' };
     }
 
@@ -52,6 +57,12 @@ export async function registerWebPush() {
             return { ok: false, reason: `permission-${permission}` };
         }
 
+=======
+        return;
+    }
+
+    try {
+>>>>>>> 28a3a0abbd9a0060b2ddc8fe90b527045805b0aa
         const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' });
         await reg.update();
         let sub = await reg.pushManager.getSubscription();
@@ -65,7 +76,11 @@ export async function registerWebPush() {
         const json = sub.toJSON();
         const csrf = metaContent('csrf-token');
 
+<<<<<<< HEAD
         const res = await fetch('/webpush/subscribe', {
+=======
+        await fetch('/webpush/subscribe', {
+>>>>>>> 28a3a0abbd9a0060b2ddc8fe90b527045805b0aa
             method: 'POST',
             credentials: 'same-origin',
             headers: {
@@ -76,6 +91,7 @@ export async function registerWebPush() {
             },
             body: JSON.stringify(json),
         });
+<<<<<<< HEAD
 
         if (!res.ok) {
             const text = await res.text().catch(() => '');
@@ -86,5 +102,9 @@ export async function registerWebPush() {
     } catch (e) {
         console.warn('Web push subscribe failed', e);
         return { ok: false, reason: 'error', error: e };
+=======
+    } catch (e) {
+        console.warn('Web push subscribe failed', e);
+>>>>>>> 28a3a0abbd9a0060b2ddc8fe90b527045805b0aa
     }
 }
